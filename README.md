@@ -96,6 +96,8 @@ Uma sala para 10 pessoas poderá começar, por exemplo, com:
 
 Se houver número ímpar de participantes, o sistema trata automaticamente o BYE.
 
+Um torneio exige pelo menos **2 participantes confirmados** para iniciar. A capacidade da sala continua sendo apenas o limite máximo.
+
 ## Transmissão
 
 A experiência principal será dividida em três áreas:
@@ -229,9 +231,27 @@ As regras dos agentes estarão em:
 
 `AGENTS.md`
 
-## Ambiente
+## Ambiente local
 
-As instruções de instalação e execução local serão documentadas após o Bootstrap inicial.
+O Bootstrap inicial disponibiliza um ambiente de desenvolvimento com frontend, backend e PostgreSQL.
+
+1. Copie `.env.example` para `.env` e mantenha somente valores locais.
+2. Execute `docker compose up --build` na raiz do repositório.
+3. Abra `http://localhost:3000`; a verificação do backend fica em `http://localhost:8000/health`.
+
+O Docker Compose atual é uma base de desenvolvimento, não uma configuração de produção. Consulte [a arquitetura](docs/architecture.md), [o guia de deploy](docs/deploy.md) e [as decisões arquiteturais](docs/adr/README.md).
+
+O plano de execução e os limites de trabalho por agente estão em [docs/v0.1-plan.md](docs/v0.1-plan.md) e [docs/agent-ownership.md](docs/agent-ownership.md). As integrações que dependem de contas ou decisões do proprietário estão em [docs/integrations.md](docs/integrations.md).
+
+## Estrutura inicial
+
+- `apps/frontend`: interface Next.js/React;
+- `apps/backend`: API FastAPI e futura autoridade do servidor;
+- `packages/game-engine`: regras oficiais independentes da interface;
+- `packages/shared-types`: contratos estáveis compartilhados;
+- `database/migrations`: histórico de mudanças de esquema;
+- `realtime`: documentação e futura integração de sincronização;
+- `docs`: arquitetura, segurança, i18n, deploy e convenções.
 
 ## Licença
 

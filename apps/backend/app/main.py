@@ -1,0 +1,506 @@
+"""Authoritative HTTP boundary for RPS: Animal Showdown.
+
+Only validated player/organizer intentions enter here. Official outcomes are
+delegated to the isolated Game Engine; this module never accepts client-sent
+results, hearts, BYEs, brackets, advances, or champions.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from hashlib import sha256
+from os import getenv
+from typing import Annotated
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+
+from .engine_gateway import (
+    GameEngineAdapter,
+    EnginePlayerSnapshot,
+    EngineUnavailable,
+    GameEngineGateway,
+    StartTournamentCommand,
+    TrainingChoiceCommand,
+)
+from .models import (
+    CreateTournamentIntent,
+    EmptyIntent,
+    JoinTournamentIntent,
+    StrategyIntent,
+    TournamentConfigurationIntent,
+    TrainingChoiceIntent,
+)
+from .security import (
+    PostgresFixedWindowRateLimiter,
+    RateLimit,
+    RateLimitExceeded,
+    RateLimiter,
+    RateLimiterUnavailable,
+    SlidingWindowRateLimiter,
+)
+from .postgres_store import PostgresTournamentStore
+from .store import (
+    InMemoryTournamentStore,
+    InvalidCredential,
+    PlayerRecord,
+    StoreError,
+    TournamentRecord,
+)
+
+
+RATE_LIMITS = {
+    "create": RateLimit(max_requests=5, window_seconds=3600),
+    "join": RateLimit(max_requests=12, window_seconds=600),
+    "strategy": RateLimit(max_requests=20, window_seconds=60),
+    "admin": RateLimit(max_requests=20, window_seconds=60),
+    "training": RateLimit(max_requests=30, window_seconds=60),
+    # This is deliberately checked before participant capability lookup so a
+    # stream of invalid bearer values cannot brute-force the room boundary.
+    "player_auth": RateLimit(max_requests=20, window_seconds=60),
+    "realtime": RateLimit(max_requests=30, window_seconds=60),
+}
+
+DEFAULT_ALLOWED_ORIGINS = ("http://localhost:3000",)
+logger = logging.getLogger(__name__)
+
+
+class RealtimeRateLimitMiddleware:
+    """Reject websocket abuse before its handler accepts the handshake."""
+
+    def __init__(self, app, *, limiter: RateLimiter) -> None:
+        self.app = app
+        self.limiter = limiter
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "websocket" and scope.get("path") == "/v1/realtime":
+            client = scope.get("client")
+            subject = f"ip:{client[0]}" if client else "ip:unknown"
+            try:
+                self.limiter.check("realtime", subject, RATE_LIMITS["realtime"])
+            except RateLimitExceeded:
+                # This occurs before websocket.accept(), so failed handshakes
+                # cannot consume connection resources or enumerate tickets.
+                await send({"type": "websocket.close", "code": 1013})
+                return
+            except RateLimiterUnavailable:
+                # Fail closed before ``accept``.  A local fallback would make
+                # reconnect abuse bypass the shared multi-instance budget.
+                await send({"type": "websocket.close", "code": 1013})
+                return
+        await self.app(scope, receive, send)
+
+
+def _allowed_origins() -> tuple[str, ...]:
+    configured = getenv("ALLOWED_ORIGINS")
+    if not configured:
+        return DEFAULT_ALLOWED_ORIGINS
+    origins = tuple(origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip())
+    if not origins or "*" in origins:
+        raise RuntimeError("ALLOWED_ORIGINS must contain one or more explicit origins.")
+    return origins
+
+
+def _client_subject(request: Request) -> str:
+    # X-Forwarded-For and Forwarded are intentionally ignored.  A deployment
+    # proxy must strip client-supplied versions and make the verified peer IP
+    # available to ASGI; trusting arbitrary headers enables trivial spoofing.
+    return f"ip:{request.client.host}" if request.client else "ip:unknown"
+
+
+def _credential_from_header(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not credential:
+        return None
+    return credential
+
+
+def _credential_subject(credential: str | None) -> str:
+    if not credential:
+        return "credential:anonymous"
+    return f"credential:{sha256(credential.encode('utf-8')).hexdigest()}"
+
+
+def _raise_store_error(error: StoreError) -> None:
+    headers = {"WWW-Authenticate": "Bearer"} if isinstance(error, InvalidCredential) else None
+    raise HTTPException(status_code=error.status_code, detail=error.detail, headers=headers) from error
+
+
+def _player_view(player: PlayerRecord) -> dict[str, object]:
+    return {
+        "player_id": player.id,
+        "display_name": player.display_name,
+        "animal_id": player.animal_id,
+        "ready": player.ready,
+        "strategy_locked": player.strategy_locked,
+    }
+
+
+def create_app(
+    store: InMemoryTournamentStore | PostgresTournamentStore | None = None,
+    limiter: RateLimiter | None = None,
+    engine: GameEngineGateway | None = None,
+) -> FastAPI:
+    """Build an app with replaceable infrastructure adapters for tests/deploy."""
+    database_url = getenv("DATABASE_URL")
+    if store is None and not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is required for the API service. "
+            "Pass an explicit InMemoryTournamentStore only to isolated unit tests."
+        )
+    tournament_store = store or PostgresTournamentStore(database_url)
+    rate_limiter: RateLimiter = limiter or (
+        PostgresFixedWindowRateLimiter(database_url or "")
+        if isinstance(tournament_store, PostgresTournamentStore)
+        else SlidingWindowRateLimiter()
+    )
+    engine_gateway = engine or GameEngineAdapter()
+    app = FastAPI(title="RPS: Animal Showdown API", version="0.1.0")
+    # Bearer capabilities are carried in Authorization headers, never cookies.
+    # Consequently this boundary does not accept credentialed CORS requests and
+    # does not need a cookie-CSRF exception. Production supplies an exact list.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(_allowed_origins()),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    def limit(request: Request, operation: str, subject: str | None = None) -> None:
+        try:
+            rate_limiter.check(operation, subject or _client_subject(request), RATE_LIMITS[operation])
+        except RateLimitExceeded as error:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many requests. Please try again later.",
+                headers={"Retry-After": str(error.retry_after_seconds)},
+            ) from error
+        except RateLimiterUnavailable as error:
+            # Do not silently downgrade to process memory.  An unavailable
+            # shared limiter means abuse protections cannot be enforced.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Request protection is temporarily unavailable.",
+                headers={"Retry-After": "5"},
+            ) from error
+
+    def require_organizer(
+        code: str,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> TournamentRecord:
+        # This must occur before capability validation. Otherwise a rejected
+        # credential can brute-force administrative access without a budget.
+        credential = _credential_from_header(authorization)
+        limit(request, "admin")
+        limit(request, "admin", _credential_subject(credential))
+        try:
+            return tournament_store.authorize_organizer(code.upper(), credential)
+        except StoreError as error:
+            _raise_store_error(error)
+
+    def require_player(
+        code: str,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> tuple[TournamentRecord, PlayerRecord]:
+        credential = _credential_from_header(authorization)
+        limit(request, "player_auth")
+        limit(request, "player_auth", _credential_subject(credential))
+        try:
+            return tournament_store.authorize_player(code.upper(), credential)
+        except StoreError as error:
+            _raise_store_error(error)
+
+    realtime_ticket_codec = None
+    if isinstance(tournament_store, PostgresTournamentStore):
+        from realtime.postgres import PostgresOutboxWorker, PostgresRealtimeStore
+        from realtime.tickets import SignedTicketCodec, TicketVerifier
+        from realtime.websocket import DatabaseBackedEventStream, OriginPolicy, register_realtime_endpoint
+
+        signing_key = getenv("REALTIME_TICKET_SIGNING_KEY")
+        if not signing_key:
+            raise RuntimeError("REALTIME_TICKET_SIGNING_KEY is required when DATABASE_URL is configured.")
+        realtime_store = PostgresRealtimeStore(database_url or "")
+        realtime_ticket_codec = SignedTicketCodec(signing_key.encode("utf-8"))
+        event_stream = DatabaseBackedEventStream(replay_store=realtime_store)
+        outbox_worker = PostgresOutboxWorker(database_url or "", worker_id=f"backend-{uuid4()}")
+        app.add_middleware(RealtimeRateLimitMiddleware, limiter=rate_limiter)
+        register_realtime_endpoint(
+            app,
+            verifier=TicketVerifier(realtime_ticket_codec, realtime_store),
+            stream=event_stream,
+            origins=OriginPolicy(frozenset(_allowed_origins())),
+        )
+
+        async def drain_outbox() -> None:
+            while True:
+                try:
+                    published = await outbox_worker.publish_one(event_stream)
+                except Exception as error:
+                    # A failed item remains leased/retryable.  Keep the
+                    # server running, but do not hide an operational failure:
+                    # the DB row has `last_error_code` and the process logs
+                    # a redacted classification for alerting/health
+                    # integration.
+                    app.state.outbox_last_error = type(error).__name__
+                    logger.warning("realtime outbox publish failed: %s", type(error).__name__)
+                    published = False
+                await asyncio.sleep(0.05 if published else 0.5)
+
+        @app.on_event("startup")
+        async def start_outbox_worker() -> None:
+            app.state.outbox_task = asyncio.create_task(drain_outbox())
+
+        @app.on_event("shutdown")
+        async def stop_outbox_worker() -> None:
+            task = getattr(app.state, "outbox_task", None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    @app.get("/health", tags=["system"])
+    def healthcheck() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/v1/tournaments", status_code=status.HTTP_201_CREATED, tags=["tournaments"])
+    def create_tournament(intent: CreateTournamentIntent, request: Request) -> dict[str, object]:
+        limit(request, "create")
+        tournament, organizer_token = tournament_store.create_tournament(intent.capacity, intent.hearts_required)
+        # This is the only response that contains the organizer capability.
+        return {
+            "tournament_id": tournament.id,
+            "tournament_code": tournament.code,
+            "organizer_access_token": organizer_token,
+            "organizer_token_expires_at": tournament.organizer_token_expires_at.isoformat(),
+        }
+
+    @app.post("/v1/tournaments/join", status_code=status.HTTP_201_CREATED, tags=["players"])
+    def join_tournament(intent: JoinTournamentIntent, request: Request) -> dict[str, object]:
+        limit(request, "join")
+        try:
+            tournament, player, player_token = tournament_store.join(
+                intent.tournament_code, intent.display_name, intent.animal_id
+            )
+        except StoreError as error:
+            _raise_store_error(error)
+        return {
+            "tournament_id": tournament.id,
+            "tournament_code": tournament.code,
+            "player": _player_view(player),
+            "player_access_token": player_token,
+        }
+
+    @app.get("/v1/tournaments/{code}/players/me", tags=["players"])
+    def get_current_player(
+        room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
+    ) -> dict[str, object]:
+        tournament, player = room
+        return {"tournament_id": tournament.id, "tournament_code": tournament.code, "player": _player_view(player)}
+
+    @app.put("/v1/tournaments/{code}/players/me/strategy", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
+    def save_strategy(
+        intent: StrategyIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
+    ) -> Response:
+        credential = _credential_from_header(authorization)
+        limit(request, "strategy")
+        limit(request, "strategy", _credential_subject(credential))
+        tournament, player = room
+        try:
+            tournament_store.save_strategy(tournament, player, intent)
+        except StoreError as error:
+            _raise_store_error(error)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post("/v1/tournaments/{code}/players/me/ready", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
+    def mark_ready(
+        intent: EmptyIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
+    ) -> Response:
+        credential = _credential_from_header(authorization)
+        limit(request, "strategy")
+        limit(request, "strategy", _credential_subject(credential))
+        tournament, player = room
+        try:
+            tournament_store.mark_ready(tournament, player)
+        except StoreError as error:
+            _raise_store_error(error)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post("/v1/tournaments/{code}/training/choice", tags=["training"])
+    def submit_training_choice(
+        intent: TrainingChoiceIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
+    ) -> object:
+        credential = _credential_from_header(authorization)
+        limit(request, "training")
+        limit(request, "training", _credential_subject(credential))
+        tournament, player = room
+        if tournament.started or player.strategy is None:
+            raise HTTPException(status_code=409, detail="Training is not available.")
+        session = tournament_store.training_session_for(tournament, player)
+        command = TrainingChoiceCommand(
+            training_id=session.training_id if session else str(uuid4()),
+            player_id=player.id,
+            hearts_required=tournament.hearts_required,
+            strategy=dict(player.strategy),
+            move=intent.move,
+            state=session.state if session else None,
+        )
+        try:
+            result = engine_gateway.run_training_choice(command)
+        except EngineUnavailable as error:
+            raise HTTPException(status_code=503, detail="Training is temporarily unavailable.") from error
+        try:
+            tournament_store.save_training_session(tournament, player, result.training_id, result.state)
+        except StoreError as error:
+            _raise_store_error(error)
+        return {"training_id": result.training_id, "state": result.snapshot}
+
+    @app.get("/v1/tournaments/{code}/admin/participants", tags=["admin"])
+    def list_participants(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> dict[str, object]:
+        participants = [_player_view(player) for player in tournament.players.values() if not player.removed]
+        return {"tournament_id": tournament.id, "tournament_code": tournament.code, "participants": participants}
+
+    @app.patch("/v1/tournaments/{code}/admin/configuration", tags=["admin"])
+    def update_configuration(
+        intent: TournamentConfigurationIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> dict[str, object]:
+        try:
+            tournament_store.update_configuration(tournament, intent.capacity, intent.hearts_required)
+        except StoreError as error:
+            _raise_store_error(error)
+        return {"capacity": tournament.capacity, "hearts_required": tournament.hearts_required}
+
+    @app.post("/v1/tournaments/{code}/admin/close-registration", status_code=status.HTTP_204_NO_CONTENT, tags=["admin"])
+    def close_registration(
+        intent: EmptyIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> Response:
+        try:
+            tournament_store.close_registration(tournament)
+        except StoreError as error:
+            _raise_store_error(error)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.delete("/v1/tournaments/{code}/admin/players/{player_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["admin"])
+    def remove_player(
+        player_id: str,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> Response:
+        try:
+            tournament_store.remove_player(tournament, player_id)
+        except StoreError as error:
+            _raise_store_error(error)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post("/v1/tournaments/{code}/admin/start", tags=["admin"])
+    def start_tournament(
+        intent: EmptyIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> dict[str, object]:
+        credential = _credential_from_header(authorization)
+        if isinstance(tournament_store, PostgresTournamentStore):
+            try:
+                return tournament_store.start_tournament_atomic(
+                    code=tournament.code,
+                    credential=credential,
+                    idempotency_key=idempotency_key,
+                    engine=engine_gateway,
+                )
+            except EngineUnavailable as error:
+                raise HTTPException(status_code=503, detail="Official tournament start is temporarily unavailable.") from error
+            except StoreError as error:
+                _raise_store_error(error)
+        players = tournament_store.ready_players_snapshot(tournament)
+        if len(players) < 2:
+            raise HTTPException(status_code=409, detail="At least two confirmed participants are required.")
+        command = StartTournamentCommand(
+            tournament_id=tournament.id,
+            hearts_required=tournament.hearts_required,
+            players=tuple(
+                EnginePlayerSnapshot(player_id=player.id, strategy=dict(player.strategy or {})) for player in players
+            ),
+        )
+        try:
+            result = engine_gateway.start_tournament(command)
+        except EngineUnavailable as error:
+            # No official fields were mutated; clients cannot bypass the Engine.
+            raise HTTPException(status_code=503, detail="Official tournament start is temporarily unavailable.") from error
+        try:
+            tournament_store.commit_started(
+                tournament,
+                tuple(player.id for player in players),
+                state_reference=result.state_reference,
+                state_snapshot=result.snapshot,
+            )
+        except StoreError as error:
+            _raise_store_error(error)
+        return {
+            "status": "started",
+            "tournament_id": tournament.id,
+            "state_reference": result.state_reference,
+        }
+
+    @app.post("/v1/tournaments/{code}/realtime/ticket", tags=["realtime"])
+    def issue_realtime_ticket(
+        request: Request,
+        code: str,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        credential = _credential_from_header(authorization)
+        limit(request, "realtime")
+        limit(request, "realtime", _credential_subject(credential))
+        if not isinstance(tournament_store, PostgresTournamentStore) or realtime_ticket_codec is None:
+            raise HTTPException(status_code=503, detail="Realtime is not configured for this environment.")
+        try:
+            ticket, expires_at = tournament_store.issue_realtime_ticket(code.upper(), credential, realtime_ticket_codec)
+        except StoreError as error:
+            _raise_store_error(error)
+        return {"ticket": ticket, "expires_at": expires_at.isoformat()}
+
+    @app.post("/v1/tournaments/{code}/admin/access/revoke", status_code=status.HTTP_204_NO_CONTENT, tags=["admin"])
+    def revoke_organizer_access(
+        intent: EmptyIntent,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> Response:
+        tournament_store.revoke_organizer_access(tournament)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    return app
+
+
+# Uvicorn imports this name.  Missing durable configuration is intentionally a
+# process-start failure instead of an unsafe fallback to process-local memory.
+app = create_app()

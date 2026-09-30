@@ -1,0 +1,17 @@
+{
+  "name": "rps-animal-showdown",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev:frontend": "npm --workspace @rps/frontend run dev",
+    "build:frontend": "npm --workspace @rps/frontend run build",
+    "lint:frontend": "npm --workspace @rps/frontend run lint"
+  },
+  "engines": {
+    "node": ">=20.9.0",
+    "npm": ">=10.0.0"
+  }
+}

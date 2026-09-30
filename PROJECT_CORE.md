@@ -117,6 +117,8 @@ Exemplo:
 
 Essa quantidade NÃO representa o número mínimo necessário para começar.
 
+Um torneio precisa de pelo menos **2 participantes confirmados** para começar. Portanto, uma sala com capacidade máxima de 10 pode iniciar com 2 a 10 participantes, mas não com 0 ou 1.
+
 O organizador poderá iniciar com:
 
 - 7;
@@ -163,6 +165,8 @@ O organizador não deve precisar atualizar manualmente a página.
 Quando o organizador clicar em:
 
 **INICIAR TORNEIO**
+
+o sistema deve recusar o início se houver menos de 2 participantes confirmados.
 
 o sistema deverá:
 
