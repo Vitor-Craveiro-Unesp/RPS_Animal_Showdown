@@ -274,13 +274,25 @@ def create_app(
     @app.post("/v1/tournaments", status_code=status.HTTP_201_CREATED, tags=["tournaments"])
     def create_tournament(intent: CreateTournamentIntent, request: Request) -> dict[str, object]:
         limit(request, "create")
-        tournament, organizer_token = tournament_store.create_tournament(intent.capacity, intent.hearts_required)
+        tournament, organizer_token = tournament_store.create_tournament(
+            intent.capacity,
+            intent.hearts_required,
+            sound_effects_enabled=intent.sound_effects_enabled,
+            background_music_enabled=intent.background_music_enabled,
+            movement_speed=intent.movement_speed,
+            countdown_speed=intent.countdown_speed,
+        )
         # This is the only response that contains the organizer capability.
         return {
             "tournament_id": tournament.id,
             "tournament_code": tournament.code,
             "organizer_access_token": organizer_token,
             "organizer_token_expires_at": tournament.organizer_token_expires_at.isoformat(),
+            "sound_effects_enabled": tournament.sound_effects_enabled,
+            "background_music_enabled": tournament.background_music_enabled,
+            "hearts_required": tournament.hearts_required,
+            "movement_speed": tournament.movement_speed,
+            "countdown_speed": tournament.countdown_speed,
         }
 
     @app.post("/v1/tournaments/join", status_code=status.HTTP_201_CREATED, tags=["players"])
@@ -295,6 +307,9 @@ def create_app(
         return {
             "tournament_id": tournament.id,
             "tournament_code": tournament.code,
+            "hearts_required": tournament.hearts_required,
+            "movement_speed": tournament.movement_speed,
+            "countdown_speed": tournament.countdown_speed,
             "player": _player_view(player),
             "player_access_token": player_token,
         }
@@ -304,7 +319,15 @@ def create_app(
         room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
     ) -> dict[str, object]:
         tournament, player = room
-        return {"tournament_id": tournament.id, "tournament_code": tournament.code, "player": _player_view(player)}
+        return {
+            "tournament_id": tournament.id,
+            "tournament_code": tournament.code,
+            "tournament_started": tournament.started,
+            "hearts_required": tournament.hearts_required,
+            "movement_speed": tournament.movement_speed,
+            "countdown_speed": tournament.countdown_speed,
+            "player": _player_view(player),
+        }
 
     @app.put("/v1/tournaments/{code}/players/me/strategy", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
     def save_strategy(
@@ -389,10 +412,25 @@ def create_app(
         tournament: TournamentRecord = Depends(require_organizer),
     ) -> dict[str, object]:
         try:
-            tournament_store.update_configuration(tournament, intent.capacity, intent.hearts_required)
+            tournament_store.update_configuration(
+                tournament,
+                intent.capacity,
+                intent.hearts_required,
+                intent.sound_effects_enabled,
+                intent.background_music_enabled,
+                intent.movement_speed,
+                intent.countdown_speed,
+            )
         except StoreError as error:
             _raise_store_error(error)
-        return {"capacity": tournament.capacity, "hearts_required": tournament.hearts_required}
+        return {
+            "capacity": tournament.capacity,
+            "hearts_required": tournament.hearts_required,
+            "sound_effects_enabled": tournament.sound_effects_enabled,
+            "background_music_enabled": tournament.background_music_enabled,
+            "movement_speed": tournament.movement_speed,
+            "countdown_speed": tournament.countdown_speed,
+        }
 
     @app.post("/v1/tournaments/{code}/admin/close-registration", status_code=status.HTTP_204_NO_CONTENT, tags=["admin"])
     def close_registration(

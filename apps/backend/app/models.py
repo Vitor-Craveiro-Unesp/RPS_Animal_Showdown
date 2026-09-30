@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -41,6 +41,10 @@ class StrategyIntent(IntentModel):
 class CreateTournamentIntent(IntentModel):
     capacity: Annotated[int, Field(ge=1)]
     hearts_required: Annotated[int, Field(ge=1)]
+    sound_effects_enabled: bool = True
+    background_music_enabled: bool = True
+    movement_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
+    countdown_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
 
 
 class JoinTournamentIntent(IntentModel):
@@ -65,6 +69,10 @@ class JoinTournamentIntent(IntentModel):
 class TournamentConfigurationIntent(IntentModel):
     capacity: Annotated[int, Field(ge=1)]
     hearts_required: Annotated[int, Field(ge=1)]
+    sound_effects_enabled: bool = True
+    background_music_enabled: bool = True
+    movement_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
+    countdown_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
 
 
 class EmptyIntent(IntentModel):

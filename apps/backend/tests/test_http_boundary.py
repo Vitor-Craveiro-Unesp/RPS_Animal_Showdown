@@ -152,8 +152,90 @@ def test_tournament_uses_uuid_internally_and_code_only_as_public_access() -> Non
     tournament = create_tournament(client)
     assert len(str(tournament["tournament_id"])) == 36
     assert tournament["tournament_code"].startswith("RPS-")
+    assert tournament["hearts_required"] == 2
     player = join_tournament(client, str(tournament["tournament_code"]), "Vitor")
     assert player["tournament_id"] == tournament["tournament_id"]
+    assert player["hearts_required"] == 2
+    current = client.get(
+        f"/v1/tournaments/{tournament['tournament_code']}/players/me",
+        headers=bearer(str(player["player_access_token"])),
+    )
+    assert current.status_code == 200
+    assert current.json()["hearts_required"] == 2
+    assert "strategy" not in current.json()["player"]
+
+
+@pytest.mark.parametrize(
+    ("sound_effects_enabled", "background_music_enabled"),
+    ((True, True), (True, False), (False, True), (False, False)),
+)
+def test_organizer_audio_preferences_are_independent_and_server_persisted(
+    sound_effects_enabled: bool,
+    background_music_enabled: bool,
+) -> None:
+    store = InMemoryTournamentStore()
+    client = TestClient(create_app(store=store))
+    created = client.post(
+        "/v1/tournaments",
+        json={
+            "capacity": 8,
+            "hearts_required": 2,
+            "sound_effects_enabled": sound_effects_enabled,
+            "background_music_enabled": background_music_enabled,
+        },
+    )
+    assert created.status_code == 201
+    tournament = created.json()
+    assert tournament["sound_effects_enabled"] is sound_effects_enabled
+    assert tournament["background_music_enabled"] is background_music_enabled
+
+    updated = client.patch(
+        f"/v1/tournaments/{tournament['tournament_code']}/admin/configuration",
+        json={
+            "capacity": 8,
+            "hearts_required": 2,
+            "sound_effects_enabled": not sound_effects_enabled,
+            "background_music_enabled": not background_music_enabled,
+        },
+        headers=bearer(str(tournament["organizer_access_token"])),
+    )
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "capacity": 8,
+        "hearts_required": 2,
+        "sound_effects_enabled": not sound_effects_enabled,
+        "background_music_enabled": not background_music_enabled,
+        "movement_speed": "1",
+        "countdown_speed": "1",
+    }
+    persisted = store.get_tournament(str(tournament["tournament_code"]))
+    assert persisted.sound_effects_enabled is (not sound_effects_enabled)
+    assert persisted.background_music_enabled is (not background_music_enabled)
+
+
+def test_audio_preferences_reject_non_boolean_values() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    response = client.post(
+        "/v1/tournaments",
+        json={
+            "capacity": 8,
+            "hearts_required": 2,
+            "sound_effects_enabled": "true",
+            "background_music_enabled": False,
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_postgres_rule_document_round_trips_independent_audio_preferences() -> None:
+    rules = PostgresTournamentStore._rules(
+        2,
+        sound_effects_enabled=False,
+        background_music_enabled=True,
+    )
+    tournament = PostgresTournamentStore._record((uuid4(), "RPS-AUDIO", "lobby", 8, rules))
+    assert tournament.sound_effects_enabled is False
+    assert tournament.background_music_enabled is True
 
 
 def test_admin_authorization_is_room_scoped_and_limits_invalid_credentials_before_authentication() -> None:

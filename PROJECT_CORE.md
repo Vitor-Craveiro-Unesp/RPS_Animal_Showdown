@@ -362,6 +362,14 @@ Cada personagem começa com:
 
 Primeiro a conseguir 3 vitórias vence.
 
+## Melhor de 7
+
+Cada personagem começa com:
+
+`❤️ ❤️ ❤️ ❤️`
+
+Primeiro a conseguir 4 vitórias vence.
+
 A quantidade de corações equivale à quantidade de vitórias necessárias para ganhar a série.
 
 ---
@@ -535,11 +543,13 @@ A batalha utilizará:
 
 O organizador poderá configurar a velocidade.
 
-Exemplos:
+Opções de velocidade:
 
-- normal;
-- metade do tempo;
-- 1/4 do tempo.
+- 0,5×;
+- 1×;
+- 2×;
+- 4×;
+- 8×.
 
 Também poderá controlar velocidade de outras animações relevantes.
 
@@ -553,35 +563,17 @@ Cada etapa da contagem utiliza som de:
 
 ---
 
-# 27. Sons de Pedra, Papel e Tesoura
+# 27. Restrição de efeitos sonoros
 
-Não tocar os sons das duas escolhas simultaneamente.
+Os efeitos sonoros do torneio ocorrem somente em:
 
-Depois da revelação:
+- contagem 3, 2, 1;
+- perda de coração;
+- eliminação;
+- vitória;
+- campeão.
 
-## Se houver vencedor
-
-Tocar somente o som correspondente ao elemento vencedor.
-
-Exemplo:
-
-Pedra × Tesoura
-
-Som:
-
-**Pedra**
-
-## Se houver empate
-
-Tocar o som do elemento empatado.
-
-Exemplo:
-
-Papel × Papel
-
-Som:
-
-**Papel**
+Não há efeito sonoro separado para a revelação de Pedra, Papel ou Tesoura.
 
 ---
 
@@ -631,6 +623,10 @@ O organizador poderá configurar separadamente:
 - música de fundo.
 
 Ambos podem ser ligados ou desligados.
+
+São configurações independentes do organizador e o servidor registra ambas
+separadamente. Assim, são permitidas todas as combinações entre música ligada
+ou desligada e efeitos ligados ou desligados.
 
 ---
 

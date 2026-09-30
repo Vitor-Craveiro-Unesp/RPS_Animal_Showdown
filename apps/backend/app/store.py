@@ -49,6 +49,10 @@ class TournamentRecord:
     hearts_required: int
     organizer_token_digest: str
     organizer_token_expires_at: datetime
+    sound_effects_enabled: bool = True
+    background_music_enabled: bool = True
+    movement_speed: str = "1"
+    countdown_speed: str = "1"
     organizer_token_revoked: bool = False
     registration_open: bool = True
     started: bool = False
@@ -90,7 +94,16 @@ class InMemoryTournamentStore:
         self._organizer_token_ttl = organizer_token_ttl
         self._tournaments: dict[str, TournamentRecord] = {}
 
-    def create_tournament(self, capacity: int, hearts_required: int) -> tuple[TournamentRecord, str]:
+    def create_tournament(
+        self,
+        capacity: int,
+        hearts_required: int,
+        *,
+        sound_effects_enabled: bool = True,
+        background_music_enabled: bool = True,
+        movement_speed: str = "1",
+        countdown_speed: str = "1",
+    ) -> tuple[TournamentRecord, str]:
         for _ in range(5):
             code = generate_tournament_code()
             if code not in self._tournaments:
@@ -100,6 +113,10 @@ class InMemoryTournamentStore:
                     code=code,
                     capacity=capacity,
                     hearts_required=hearts_required,
+                    sound_effects_enabled=sound_effects_enabled,
+                    background_music_enabled=background_music_enabled,
+                    movement_speed=movement_speed,
+                    countdown_speed=countdown_speed,
                     organizer_token_digest=credential_digest(token),
                     organizer_token_expires_at=self._now() + self._organizer_token_ttl,
                 )
@@ -182,7 +199,16 @@ class InMemoryTournamentStore:
             raise StoreError()
         player.ready = True
 
-    def update_configuration(self, tournament: TournamentRecord, capacity: int, hearts_required: int) -> None:
+    def update_configuration(
+        self,
+        tournament: TournamentRecord,
+        capacity: int,
+        hearts_required: int,
+        sound_effects_enabled: bool,
+        background_music_enabled: bool,
+        movement_speed: str,
+        countdown_speed: str,
+    ) -> None:
         if tournament.started:
             raise StoreError()
         active_players = sum(not player.removed for player in tournament.players.values())
@@ -190,6 +216,10 @@ class InMemoryTournamentStore:
             raise StoreError()
         tournament.capacity = capacity
         tournament.hearts_required = hearts_required
+        tournament.sound_effects_enabled = sound_effects_enabled
+        tournament.background_music_enabled = background_music_enabled
+        tournament.movement_speed = movement_speed
+        tournament.countdown_speed = countdown_speed
 
     def close_registration(self, tournament: TournamentRecord) -> None:
         if tournament.started:

@@ -69,8 +69,24 @@ class PostgresTournamentStore:
         return psycopg.connect(self._database_url)
 
     @staticmethod
-    def _rules(hearts_required: int, animals: dict[str, str] | None = None) -> dict[str, object]:
-        return {"hearts_required": hearts_required, "animals": animals or {}, "registration_open": True}
+    def _rules(
+        hearts_required: int,
+        animals: dict[str, str] | None = None,
+        *,
+        sound_effects_enabled: bool = True,
+        background_music_enabled: bool = True,
+        movement_speed: str = "1",
+        countdown_speed: str = "1",
+    ) -> dict[str, object]:
+        return {
+            "hearts_required": hearts_required,
+            "sound_effects_enabled": sound_effects_enabled,
+            "background_music_enabled": background_music_enabled,
+            "movement_speed": movement_speed,
+            "countdown_speed": countdown_speed,
+            "animals": animals or {},
+            "registration_open": True,
+        }
 
     @staticmethod
     def _read_rules(value: object) -> dict[str, object]:
@@ -92,6 +108,14 @@ class PostgresTournamentStore:
         registration_open = parsed_rules.get("registration_open", True)
         if not isinstance(registration_open, bool):
             raise RuntimeError("Persisted registration_open is invalid.")
+        sound_effects_enabled = parsed_rules.get("sound_effects_enabled", True)
+        background_music_enabled = parsed_rules.get("background_music_enabled", True)
+        if not isinstance(sound_effects_enabled, bool) or not isinstance(background_music_enabled, bool):
+            raise RuntimeError("Persisted audio configuration is invalid.")
+        movement_speed = parsed_rules.get("movement_speed", "1")
+        countdown_speed = parsed_rules.get("countdown_speed", "1")
+        if movement_speed not in {"0.5", "1", "2", "4", "8"} or countdown_speed not in {"0.5", "1", "2", "4", "8"}:
+            raise RuntimeError("Persisted presentation speed is invalid.")
         return TournamentRecord(
             id=str(room_id),
             code=code,
@@ -99,6 +123,10 @@ class PostgresTournamentStore:
             hearts_required=hearts,
             organizer_token_digest="",  # capabilities are queried directly.
             organizer_token_expires_at=datetime.max.replace(tzinfo=UTC),
+            sound_effects_enabled=sound_effects_enabled,
+            background_music_enabled=background_music_enabled,
+            movement_speed=movement_speed,
+            countdown_speed=countdown_speed,
             registration_open=status == "lobby" and registration_open,
             started=status in {"running", "completed"},
             players=players or {},
@@ -160,7 +188,16 @@ class PostgresTournamentStore:
         tournament.players = self._load_players(cursor, tournament)
         return tournament
 
-    def create_tournament(self, capacity: int, hearts_required: int) -> tuple[TournamentRecord, str]:
+    def create_tournament(
+        self,
+        capacity: int,
+        hearts_required: int,
+        *,
+        sound_effects_enabled: bool = True,
+        background_music_enabled: bool = True,
+        movement_speed: str = "1",
+        countdown_speed: str = "1",
+    ) -> tuple[TournamentRecord, str]:
         for _ in range(5):
             tournament_id, organizer_subject_id, capability_id = uuid4(), uuid4(), uuid4()
             code, token = generate_tournament_code(), generate_access_token()
@@ -172,7 +209,21 @@ class PostgresTournamentStore:
                         INSERT INTO tournaments (id, access_code, organizer_subject_id, capacity, rules)
                         VALUES (%s, %s, %s, %s, %s::jsonb)
                         """,
-                        (str(tournament_id), code, str(organizer_subject_id), capacity, json.dumps(self._rules(hearts_required))),
+                        (
+                            str(tournament_id),
+                            code,
+                            str(organizer_subject_id),
+                            capacity,
+                            json.dumps(
+                                self._rules(
+                                    hearts_required,
+                                    sound_effects_enabled=sound_effects_enabled,
+                                    background_music_enabled=background_music_enabled,
+                                    movement_speed=movement_speed,
+                                    countdown_speed=countdown_speed,
+                                )
+                            ),
+                        ),
                     )
                     cursor.execute(
                         """
@@ -186,6 +237,10 @@ class PostgresTournamentStore:
                         TournamentRecord(
                             id=str(tournament_id), code=code, capacity=capacity, hearts_required=hearts_required,
                             organizer_token_digest=credential_digest(token), organizer_token_expires_at=expires_at,
+                            sound_effects_enabled=sound_effects_enabled,
+                            background_music_enabled=background_music_enabled,
+                            movement_speed=movement_speed,
+                            countdown_speed=countdown_speed,
                         ),
                         token,
                     )
@@ -329,14 +384,34 @@ class PostgresTournamentStore:
             raise StoreError()
         self._training_sessions[(tournament.id, player.id)] = TrainingSessionRecord(training_id=training_id, state=state)
 
-    def update_configuration(self, tournament: TournamentRecord, capacity: int, hearts_required: int) -> None:
+    def update_configuration(
+        self,
+        tournament: TournamentRecord,
+        capacity: int,
+        hearts_required: int,
+        sound_effects_enabled: bool,
+        background_music_enabled: bool,
+        movement_speed: str,
+        countdown_speed: str,
+    ) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status, rules FROM tournaments WHERE id = %s FOR UPDATE", (tournament.id,))
             row = cursor.fetchone()
             if row is None or row[0] != "lobby" or capacity < sum(not player.removed for player in tournament.players.values()):
                 raise StoreError()
-            rules = self._read_rules(row[1]); rules["hearts_required"] = hearts_required
+            rules = self._read_rules(row[1])
+            rules["hearts_required"] = hearts_required
+            rules["sound_effects_enabled"] = sound_effects_enabled
+            rules["background_music_enabled"] = background_music_enabled
+            rules["movement_speed"] = movement_speed
+            rules["countdown_speed"] = countdown_speed
             cursor.execute("UPDATE tournaments SET capacity = %s, rules = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (capacity, json.dumps(rules), tournament.id))
+            tournament.capacity = capacity
+            tournament.hearts_required = hearts_required
+            tournament.sound_effects_enabled = sound_effects_enabled
+            tournament.background_music_enabled = background_music_enabled
+            tournament.movement_speed = movement_speed
+            tournament.countdown_speed = countdown_speed
 
     def close_registration(self, tournament: TournamentRecord) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
