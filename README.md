@@ -55,13 +55,15 @@ Isso permite criar estratégias condicionais sem dar vantagens exclusivas aos pe
 
 ## Personagens
 
-A primeira versão utilizará 20 animais.
+A primeira versão utilizará 26 animais.
 
 A seleção será feita em um mapa-múndi interativo.
 
 Cada emoji será posicionado aproximadamente sobre a região associada ao personagem.
 
-O nome do país não será exibido explicitamente.
+O país ou região e o continente aparecem ao selecionar o animal.
+
+O mapa de seleção usa SVGs locais com fronteiras e rótulos de países, gerados a partir de `apps/frontend/public/maps/world-map-countries.svg`. A arte é de [World.ie](https://world.ie/map/), baseada em dados de [Natural Earth](https://www.naturalearthdata.com/about/terms-of-use/); ambos a disponibilizam em domínio público. O script `scripts/localize-world-map.mjs` gera versões em inglês, português, chinês e árabe sem rótulos de continentes ou territórios não soberanos. No celular, o mapa pode ser deslocado e ampliado para leitura dos países.
 
 Personagens podem ser repetidos.
 

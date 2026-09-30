@@ -193,7 +193,7 @@ O organizador não escolhe manualmente.
 
 # 10. Catálogo inicial
 
-A primeira versão utilizará **20 personagens animais**.
+A primeira versão utilizará **26 personagens animais**.
 
 Cada personagem terá um emoji diferente.
 
@@ -212,7 +212,7 @@ A estratégia diferencia os jogadores.
 1. Estados Unidos — Águia — 🦅
 2. China — Panda — 🐼
 3. Austrália — Canguru — 🦘
-4. Canadá — Castor — 🦫
+4. Canadá — Lontra — 🦦
 5. Japão — Macaco japonês — 🐵
 6. França — Galo — 🐓
 7. Espanha — Touro — 🐂
@@ -220,17 +220,23 @@ A estratégia diferencia os jogadores.
 9. Tailândia — Elefante — 🐘
 10. Rússia — Urso — 🐻
 11. Peru — Lhama — 🦙
-12. Turquia — Lobo — 🐺
+12. Honduras — Veado-de-cauda-branca — 🦌
 13. Arábia Saudita — Camelo — 🐪
 14. Paquistão — Markhor/Cabra — 🐐
 15. Indonésia — Dragão de Komodo — 🦎
-16. Nepal — Vaca — 🐄
+16. Turquia — Gato angorá — 🐱
 17. Botsuana — Zebra — 🦓
-18. Madagascar — Lêmure — 🐒
+18. Brasil — Arara — 🦜
 19. Uganda — Grou-coroado — 🐦
 20. Quênia — Leão — 🦁
+21. Polo Sul — Pinguim — 🐧
+22. Ártico — Polvo do Ártico (nome descritivo do jogo) — 🐙
+23. Ruanda — Gorila — 🦍
+24. Bangladesh — Hilsa — 🐟
+25. Uruguai — Cavalo — 🐎
+26. Cabo Verde — Tubarão — 🦈
 
-O catálogo interno poderá registrar o país para posicionamento no mapa, mas o nome do país não precisa ser exibido ao usuário.
+O catálogo registra país ou região para posicionamento no mapa e exibe essa origem no detalhe do animal selecionado.
 
 ---
 
@@ -238,17 +244,13 @@ O catálogo interno poderá registrar o país para posicionamento no mapa, mas o
 
 A escolha do personagem será realizada através de um mapa-múndi interativo.
 
-Cada emoji deverá aparecer aproximadamente sobre o país associado ao personagem.
+Cada emoji deverá aparecer aproximadamente sobre o país ou região associado ao personagem.
 
-O nome do país NÃO deve aparecer explicitamente.
-
-A associação fica implícita pela localização do animal.
-
-Ao tocar ou clicar no emoji, mostrar apenas informações relacionadas ao personagem.
+O mapa deve apresentar fronteiras e nomes de países, sem rótulos de continentes ou territórios não soberanos. Ao tocar ou clicar no emoji, mostrar o nome do animal e o país ou região associado, no idioma escolhido. Países pequenos podem usar siglas no mapa, desde que o nome completo apareça no detalhe do animal.
 
 Exemplo:
 
-`🐼 Panda`
+`🐼 Panda — China — Ásia`
 
 `[ ESCOLHER ]`
 
