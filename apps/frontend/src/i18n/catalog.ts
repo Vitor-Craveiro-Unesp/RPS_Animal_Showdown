@@ -146,3 +146,7 @@ Object.assign(interfaceText["pt-BR"], { semifinals:"Semifinais" });
 Object.assign(interfaceText.en, { semifinals:"Semifinals" });
 Object.assign(interfaceText["zh-CN"], { semifinals:"半决赛" });
 Object.assign(interfaceText.ar, { semifinals:"نصف النهائي" });
+Object.assign(interfaceText["pt-BR"], { homeJoinAction:"Entrar No Torneio", trainingStrategyAction:"Treinar Estratégia" });
+Object.assign(interfaceText.en, { homeJoinAction:"Join Tournament", trainingStrategyAction:"Train Strategy" });
+Object.assign(interfaceText["zh-CN"], { homeJoinAction:"加入锦标赛", trainingStrategyAction:"训练策略" });
+Object.assign(interfaceText.ar, { homeJoinAction:"انضم إلى البطولة", trainingStrategyAction:"تدرّب على الاستراتيجية" });

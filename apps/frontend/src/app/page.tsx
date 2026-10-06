@@ -745,14 +745,14 @@ export default function HomePage() {
       <div className="brand-stack">
         <div className="brand-row">
           <button className="back brand" onClick={() => setScreen("home")}>RPS: <b>ANIMAL</b> SHOWDOWN</button>
-          <div className="player-audio-controls" role="group" aria-label={t("music")}>
-            <button type="button" className="player-audio-toggle" aria-pressed={playerBackgroundMusicEnabled} onClick={() => updatePlayerAudioPreferences(playerSoundEffectsEnabled, !playerBackgroundMusicEnabled)}>
-              <span aria-hidden="true">🎵</span><span>{t("music")}</span><b>{playerBackgroundMusicEnabled ? t("musicOn") : t("musicOff")}</b>
-            </button>
-            <button type="button" className="player-audio-toggle" aria-pressed={playerSoundEffectsEnabled} onClick={() => updatePlayerAudioPreferences(!playerSoundEffectsEnabled, playerBackgroundMusicEnabled)}>
-              <span aria-hidden="true">🔊</span><span>{t("sound")}</span><b>{playerSoundEffectsEnabled ? t("audioOn") : t("audioOff")}</b>
-            </button>
-          </div>
+        </div>
+        <div className="player-audio-controls" role="group" aria-label={t("music")}>
+          <button type="button" className="player-audio-toggle" aria-pressed={playerBackgroundMusicEnabled} onClick={() => updatePlayerAudioPreferences(playerSoundEffectsEnabled, !playerBackgroundMusicEnabled)}>
+            <span aria-hidden="true">🎵</span><span>{t("music")}</span><b>{playerBackgroundMusicEnabled ? t("musicOn") : t("musicOff")}</b>
+          </button>
+          <button type="button" className="player-audio-toggle" aria-pressed={playerSoundEffectsEnabled} onClick={() => updatePlayerAudioPreferences(!playerSoundEffectsEnabled, playerBackgroundMusicEnabled)}>
+            <span aria-hidden="true">🔊</span><span>{t("sound")}</span><b>{playerSoundEffectsEnabled ? t("audioOn") : t("audioOff")}</b>
+          </button>
         </div>
         <div className="locale-switcher" role="group" aria-label={u("language")}>
           {locales.map((item) => <button key={item} type="button" className="locale-choice" aria-pressed={locale === item} onClick={() => setLocale(item)}>
@@ -766,15 +766,15 @@ export default function HomePage() {
 
     {screen === "home" && <section className="hero">
       <div>
-        <span className="eyebrow">{u("liveArena")}</span>
+        <span className="eyebrow"><span>{u("liveArena")}</span><span className="live-indicator" aria-hidden="true" /></span>
         <h1>RPS<br />ANIMAL<br />SHOWDOWN</h1>
         <div className="animal-showcase" role="img" aria-label={t("tagline")}>
           {animalShowcaseRows.map((row, rowIndex) => <div className="animal-row" key={rowIndex}>{row.map((emoji, emojiIndex) => <span key={`${rowIndex}-${emojiIndex}`}>{emoji}</span>)}</div>)}
         </div>
         <div className="cta-row">
-          <button className="button" onClick={() => setScreen("join")}>{t("join")}</button>
-          <button className="button secondary" onClick={() => { clearRequestFailure(); setScreen("create"); }}>{t("create")}</button>
-          <button className="button secondary" onClick={() => { tournamentStartedRef.current = false; clearRequestFailure(); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{u("guestTraining")}</button>
+          <button className="button home-action home-action-yellow" onClick={() => setScreen("join")}>{u("homeJoinAction")}</button>
+          <button className="button home-action home-action-mint" onClick={() => { clearRequestFailure(); setScreen("create"); }}>{t("create")}</button>
+          <button className="button home-action home-action-yellow" onClick={() => { tournamentStartedRef.current = false; clearRequestFailure(); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{u("trainingStrategyAction")}</button>
         </div>
       </div>
       <aside className="sponsor">
