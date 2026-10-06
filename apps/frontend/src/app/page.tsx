@@ -50,9 +50,12 @@ type OfficialState = { run_id?: string; run_start_sequence?: number; first_place
 type OfficialEvent = { eventId: string; sequence: number; eventType: string; payload: unknown };
 const animalRushEmoji: Record<AnimalRushMove, string> = { rock: "✊", paper: "📄", scissors: "✂️" };
 const tournamentRealtimeScreens = new Set<Screen>(["waiting", "animal-rush", "animal-rush-result", "training-avatar", "training", "training-complete", "arena"]);
-const savedAudioPreference = (key: string) => {
-  if (typeof window === "undefined") return true;
-  try { return window.localStorage.getItem(key) !== "false"; } catch { return true; }
+const savedAudioPreference = (key: string, defaultValue = true) => {
+  if (typeof window === "undefined") return defaultValue;
+  try {
+    const savedValue = window.localStorage.getItem(key);
+    return savedValue === null ? defaultValue : savedValue !== "false";
+  } catch { return defaultValue; }
 };
 const resetTrainingChampionCue = (reference: { current: string | null }) => { reference.current = null; };
 const playbackSpeeds: ReadonlyArray<{ value: PlaybackSpeed; label: string }> = [
@@ -93,7 +96,7 @@ export default function HomePage() {
   // Keep the server and the first client render identical. Browser preferences
   // are restored only after hydration, then persisted on subsequent changes.
   const [playerSoundEffectsEnabled, setPlayerSoundEffectsEnabled] = useState(true);
-  const [playerBackgroundMusicEnabled, setPlayerBackgroundMusicEnabled] = useState(true);
+  const [playerBackgroundMusicEnabled, setPlayerBackgroundMusicEnabled] = useState(false);
   const [playerAudioPreferencesLoaded, setPlayerAudioPreferencesLoaded] = useState(false);
   const [organizerToken, setOrganizerToken] = useState("");
   const [playerToken, setPlayerToken] = useState("");
@@ -124,8 +127,10 @@ export default function HomePage() {
   };
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setPlayerSoundEffectsEnabled(savedAudioPreference("rps-player-sound-effects"));
-      setPlayerBackgroundMusicEnabled(savedAudioPreference("rps-player-background-music"));
+      setPlayerSoundEffectsEnabled(savedAudioPreference("rps-player-sound-effects", true));
+      // A new visitor starts with music muted. A later opt-in is remembered
+      // under this versioned key without inheriting the previous default.
+      setPlayerBackgroundMusicEnabled(savedAudioPreference("rps-player-background-music-v2", false));
       setPlayerAudioPreferencesLoaded(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -134,7 +139,7 @@ export default function HomePage() {
     if (!playerAudioPreferencesLoaded) return;
     try {
       window.localStorage.setItem("rps-player-sound-effects", String(playerSoundEffectsEnabled));
-      window.localStorage.setItem("rps-player-background-music", String(playerBackgroundMusicEnabled));
+      window.localStorage.setItem("rps-player-background-music-v2", String(playerBackgroundMusicEnabled));
     } catch {}
   }, [playerAudioPreferencesLoaded, playerSoundEffectsEnabled, playerBackgroundMusicEnabled]);
   useEffect(() => {
