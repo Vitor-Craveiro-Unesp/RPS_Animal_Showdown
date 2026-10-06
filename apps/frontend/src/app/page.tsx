@@ -391,6 +391,7 @@ export default function HomePage() {
     let retryTimer: number | undefined;
     let attempt = 0;
     let hasSynchronizedSnapshot = Boolean(lastOfficialStateRef.current);
+    let websocketSubscribed = false;
     const accessToken = organizerToken || playerToken;
     const sequenceKey = `rps-realtime-sequence:${tournamentId || code}`;
     const eventsKey = `rps-realtime-events:${tournamentId || code}`;
@@ -408,7 +409,7 @@ export default function HomePage() {
       const payload = await response.json() as OfficialState;
       if (!disposed) {
         hasSynchronizedSnapshot = true;
-        setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: true, websocketSubscribed: false }));
+        setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: true, websocketSubscribed }));
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
@@ -428,7 +429,8 @@ export default function HomePage() {
     };
     const scheduleReconnect = () => {
       if (disposed) return;
-      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: false }));
+      websocketSubscribed = false;
+      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed }));
       if (attempt >= 5) { setRealtimeStatus("fallback"); return; }
       const delay = Math.min(1_000 * 2 ** attempt, 16_000);
       attempt += 1;
@@ -440,7 +442,7 @@ export default function HomePage() {
       return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000/v1/realtime`;
     };
     const connect = async () => {
-      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: false }));
+      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed }));
       try {
         const ticketResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/realtime/ticket`, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
         if (!ticketResponse.ok) throw new Error("ticket unavailable");
@@ -453,7 +455,7 @@ export default function HomePage() {
         socket.onmessage = (message) => {
           let frame: Record<string, unknown>;
           try { frame = JSON.parse(String(message.data)) as Record<string, unknown>; } catch { return; }
-          if (frame.type === "subscribed") { attempt = 0; setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: true })); socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current })); return; }
+          if (frame.type === "subscribed") { attempt = 0; websocketSubscribed = true; setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed })); socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current })); return; }
           if (frame.type === "replay-reset" && Number.isSafeInteger(frame.afterSequence) && Number(frame.afterSequence) >= 0) {
             lastSequenceRef.current = Math.max(lastSequenceRef.current, Number(frame.afterSequence));
             sessionStorage.setItem(sequenceKey, String(lastSequenceRef.current));
@@ -485,7 +487,7 @@ export default function HomePage() {
           }
           if (frame.eventType === "tournament_started") { interruptForOfficialStart(); void loadSnapshot().catch(() => setRealtimeStatus("fallback")); }
         };
-        socket.onclose = () => { presentationQueue.clear(); audio?.stop("arena"); scheduleReconnect(); };
+        socket.onclose = () => { websocketSubscribed = false; presentationQueue.clear(); audio?.stop("arena"); scheduleReconnect(); };
         socket.onerror = () => socket?.close();
       } catch { void loadSnapshot().catch(() => undefined); scheduleReconnect(); }
     };
