@@ -3,7 +3,7 @@ services:
     name: rps-animal-showdown-api
     runtime: python
     buildCommand: pip install --no-cache-dir -r apps/backend/requirements.txt && pip install --no-cache-dir ./packages/game-engine
-    startCommand: uvicorn app.main:app --app-dir apps/backend --host 0.0.0.0 --port $PORT
+    startCommand: PYTHONPATH=. uvicorn app.main:app --app-dir apps/backend --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
