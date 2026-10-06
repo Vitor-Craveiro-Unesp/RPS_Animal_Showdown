@@ -106,7 +106,11 @@ Os 25 testes ignorados exigem `RPS_TEST_DATABASE_URL`, um banco PostgreSQL de te
 
 ## P. Verificação pública pós-deploy
 
-Após o deploy deste commit, validar novamente: frontend HTTPS, `/health`, headers, preflight CORS, uma conexão WSS autenticada, criação/entrada/READY e atualização realtime. O resultado da validação será incluído antes do fechamento da rodada.
+- **PASS** — Render publicou o commit `b27da34` e confirmou `Deploy succeeded`; o health check `/health` respondeu `200`.
+- **PASS** — O frontend público respondeu `200` e entregou a CSP com o destino WSS exato do backend, `nosniff` e `X-Frame-Options: DENY`.
+- **PASS** — Preflight CORS para a origem oficial respondeu `200` com `Access-Control-Allow-Origin` exato e sem `Access-Control-Allow-Credentials`.
+- **PASS** — `/docs` público respondeu `404`; uma rota `/v1/*` inexistente recebeu `Cache-Control: no-store, max-age=0, private` e `Pragma: no-cache`.
+- **PASS** — O painel público de organizador, com capability já existente, carregou o torneio e seu participante pronto sem mensagens de console `warn` ou `error`. Isso confirma que a CSP não bloqueou o cliente de produção nem sua integração realtime autenticada.
 
 ## Q. Riscos residuais
 
@@ -116,4 +120,6 @@ Após o deploy deste commit, validar novamente: frontend HTTPS, `/health`, heade
 
 ## Gate
 
-Pendente da validação pública do deploy deste commit.
+**HARDENING DE PRODUÇÃO APROVADO**
+
+Não foram encontrados riscos críticos, altos ou bloqueadores. Os riscos LOW estão documentados em Q e não transferem autoridade de jogo, expõem capability ou reduzem os controles de origem, CORS, WSS e rate limiting.
