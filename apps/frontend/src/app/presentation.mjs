@@ -8,7 +8,7 @@ export function eventSteps(event, movement = 1, countdown = 1) {
     case 'player_waiting': return [step('waiting', 900)];
     case 'second_chance_selected': return [step('secondChance', 1400)];
     case 'match_started': return [step('entrance', 900)];
-    case 'round_resolved': return [3, 2, 1].map(number => ({ ...step('countdown', 0, 'countdown'), number, ms: duration(650, countdown) })).concat([step('reveal', 650), step('result', 500)]);
+    case 'round_resolved': return [3, 2, 1].map(number => ({ ...step('countdown', 0, 'countdown'), number, ms: duration(650, countdown) })).concat([step('reveal', 650), step('result', 500, event.payload?.outcome === 'tie' ? 'tie' : null)]);
     case 'heart_lost': return [step('heart', 650, 'heart_lost')];
     case 'player_eliminated': return [step('elimination', 700)];
     case 'match_completed': return [step('victory', 750)];

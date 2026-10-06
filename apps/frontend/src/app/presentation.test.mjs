@@ -19,7 +19,7 @@ test('all configured animal IDs resolve to a local MP3 in the official animals d
   assert.equal(Object.keys(AUDIO_ASSETS.animals).length, 27);
   for (const source of Object.values(AUDIO_ASSETS.animals)) assert.match(source, /^\/audio\/animals\/A[-_][\w-]+\.mp3$/);
   assert.match(AUDIO_ASSETS.background, /^\/audio\/background\//);
-  assert.deepEqual(Object.keys(AUDIO_ASSETS.effects).sort(), ['champion', 'countdown', 'heart_lost', 'podium']);
+  assert.deepEqual(Object.keys(AUDIO_ASSETS.effects).sort(), ['champion', 'countdown', 'heart_lost', 'podium', 'tie']);
 });
 
 test('normal selection replaces the prior animal sound and supports every configured animal', () => {
@@ -65,6 +65,15 @@ test('only selected local effects are used; elimination and generic victory rema
   assert.equal(audio.effect('player_eliminated'), false); assert.equal(audio.effect('victory'), false);
   audio.effect('countdown'); assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.countdown);
   audio.effect('heart_lost'); assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.heart_lost);
+});
+
+test('a tie uses the local tie cue only when the authoritative outcome is tie', () => {
+  const tied = eventSteps({ ...event(4), payload: { stateVersion: 4, outcome: 'tie' } });
+  const resolved = eventSteps({ ...event(5), payload: { stateVersion: 5, outcome: 'player_one_win' } });
+  assert.equal(tied.at(-1).sound, 'tie');
+  assert.equal(resolved.at(-1).sound, null);
+  const h = host(), audio = new AudioManager(h); audio.configure(true, false);
+  audio.effect(tied.at(-1).sound); assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.tie);
 });
 
 test('champion cue always precedes podium cue and replaces it rather than overlapping', () => {

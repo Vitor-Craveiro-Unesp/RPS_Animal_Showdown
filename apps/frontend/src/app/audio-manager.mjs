@@ -13,7 +13,7 @@ export const AUDIO_ASSETS = Object.freeze({
   }),
   effects: Object.freeze({
     countdown: '/audio/effects/countdown_beep.mp3', heart_lost: '/audio/effects/heart_break.mp3',
-    champion: '/audio/effects/champion.mp3', podium: '/audio/effects/podium.mp3',
+    tie: '/audio/effects/tie.mp3', champion: '/audio/effects/champion.mp3', podium: '/audio/effects/podium.mp3',
   }),
   background: '/audio/background/background.mp3',
 });

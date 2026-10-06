@@ -32,7 +32,7 @@ type AnimalRushMove = "rock" | "paper" | "scissors";
 type AnimalRushFeedback = "correct" | "incorrect" | "timeout" | null;
 type Distribution = { rock: number; paper: number; scissors: number };
 type Participant = { player_id: string; display_name: string; animal_id: string; ready: boolean; strategy_locked: boolean; membership_status?: string; removed?: boolean };
-type TrainingRound = { number: number; manual_move: string; character_move: string; manual_hearts: number; character_hearts: number };
+type TrainingRound = { number: number; manual_move: string; character_move: string; outcome: string; manual_hearts: number; character_hearts: number };
 type TrainingState = { manual_hearts?: number; character_hearts?: number; rounds?: TrainingRound[]; status?: "active" | "completed"; winner?: "manual_player" | "character" };
 const trainingAvatars = [
   { id: "man", emoji: "👨🏻", label: "trainerMan" }, { id: "woman", emoji: "👩‍🦰", label: "trainerWoman" },
@@ -689,6 +689,7 @@ export default function HomePage() {
     setTrainingState(nextState);
     const lostHeart = (nextState.manual_hearts ?? 0) < (before?.manual_hearts ?? nextState.manual_hearts ?? 0) || (nextState.character_hearts ?? 0) < (before?.character_hearts ?? nextState.character_hearts ?? 0);
     if (lostHeart) audio?.effect("heart_lost");
+    if (nextState.rounds?.at(-1)?.outcome === "tie") audio?.effect("tie");
     if (nextState.status === "completed") setScreen(guestTraining ? "guest-training-complete" : "training-complete");
     clearRequestFailure();
   }
