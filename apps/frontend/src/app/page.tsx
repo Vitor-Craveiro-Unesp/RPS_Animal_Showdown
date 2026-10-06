@@ -5,6 +5,7 @@ import Image from "next/image";
 import CinematicArena from "./cinematic-arena";
 import { PresentationQueue } from "./presentation.mjs";
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
+import { requestFeedbackKind } from "./request-feedback.mjs";
 import { restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { animalName, animalShowcaseRows, Locale, localeNames, locales, regionName, scientificName, text, uiText } from "../i18n/catalog";
 import { animalRushRoundDuration, randomAnimalRushMove, resolveAnimalRushAnswer, winningAnimalRushMove } from "./animal-rush.mjs";
@@ -100,7 +101,7 @@ export default function HomePage() {
   const [sessionRestored, setSessionRestored] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [requestFailed, setRequestFailed] = useState(false);
-  const [createRateLimited, setCreateRateLimited] = useState(false);
+  const [requestRateLimited, setRequestRateLimited] = useState(false);
   const [trainingState, setTrainingState] = useState<TrainingState | null>(null);
   const [trainingAvatar, setTrainingAvatar] = useState<TrainingAvatar | null>(null);
   const [guestTrainingId, setGuestTrainingId] = useState("");
@@ -112,6 +113,14 @@ export default function HomePage() {
   const selectionAudioRef = useRef<HTMLAudioElement | null>(null);
   const effectiveSoundEffectsEnabled = soundEffectsEnabled && playerSoundEffectsEnabled;
   const effectiveBackgroundMusicEnabled = backgroundMusicEnabled && playerBackgroundMusicEnabled;
+  const reportRequestFailure = (response?: Response) => {
+    setRequestRateLimited(requestFeedbackKind(response?.status) === "rateLimited");
+    setRequestFailed(true);
+  };
+  const clearRequestFailure = () => {
+    setRequestRateLimited(false);
+    setRequestFailed(false);
+  };
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setPlayerSoundEffectsEnabled(savedAudioPreference("rps-player-sound-effects"));
@@ -227,6 +236,7 @@ export default function HomePage() {
   }, [presentationQueue, tournamentId]);
   const t = (key: any) => text(locale, key);
   const u = (key: string) => uiText(locale, key);
+  const requestFailureMessage = requestRateLimited ? t("rateLimited") : t("network");
   const distribution = strategy[condition];
   const total = distribution.rock + distribution.paper + distribution.scissors;
   const completed = strategyConditions.filter((key) => strategy[key].rock + strategy[key].paper + strategy[key].scissors === 100).length;
@@ -314,7 +324,7 @@ export default function HomePage() {
     if (screen !== "organizer" || !code || !organizerToken) return;
     const loadParticipants = async () => {
       const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/admin/participants`, { headers: { Authorization: `Bearer ${organizerToken}` } });
-      if (!response.ok) return setRequestFailed(true);
+      if (!response.ok) return reportRequestFailure(response);
       const payload = await response.json();
       setParticipants(Array.isArray(payload.participants) ? payload.participants : []);
     };
@@ -327,7 +337,7 @@ export default function HomePage() {
     if (!realtimeEligible || !code || !playerToken || realtimeStatus !== "fallback") return;
     const refreshStatus = async () => {
       const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me`, { headers: { Authorization: `Bearer ${playerToken}` } });
-      if (!response.ok) return setRequestFailed(true);
+      if (!response.ok) return reportRequestFailure(response);
       const payload = await response.json();
       if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
       if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
@@ -366,7 +376,7 @@ export default function HomePage() {
         }
         if (typeof payload.hearts_per_match === "number") setHeartsRequired(payload.hearts_per_match);
         interruptForOfficialStart();
-      } catch { if (!disposed) setRequestFailed(true); }
+      } catch { if (!disposed) reportRequestFailure(); }
     };
     void refreshOfficial();
     const timer = window.setInterval(() => void refreshOfficial(), 15_000);
@@ -495,13 +505,11 @@ export default function HomePage() {
         }),
       });
       if (!response.ok) {
-        setCreateRateLimited(response.status === 429);
-        setRequestFailed(true);
+        reportRequestFailure(response);
         return;
       }
-      setCreateRateLimited(false);
+      clearRequestFailure();
       tournamentStartedRef.current = false;
-      setRequestFailed(false);
       const tournament = await response.json();
       setCode(tournament.tournament_code);
       setTournamentId(tournament.tournament_id);
@@ -515,18 +523,18 @@ export default function HomePage() {
       });
       setScreen("organizer");
     } catch {
-      setRequestFailed(true);
+      reportRequestFailure();
     } finally {
       setCreateBusy(false);
     }
   }
 
   async function readyForTournament() {
-    if (!code.trim() || !name.trim() || !validStrategy) return setRequestFailed(true);
+    if (!code.trim() || !name.trim() || !validStrategy) return reportRequestFailure();
     let capability = playerToken;
     if (!capability) {
       const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
-      if (!joined.ok) return setRequestFailed(true);
+      if (!joined.ok) return reportRequestFailure(joined);
       const payload = await joined.json();
       capability = payload.player_access_token;
       setTournamentId(payload.tournament_id);
@@ -543,17 +551,17 @@ export default function HomePage() {
     }
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${capability}` };
     const strategyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, { method: "PUT", headers, body: JSON.stringify(strategy) });
-    if (!strategyResponse.ok) return setRequestFailed(true);
+    if (!strategyResponse.ok) return reportRequestFailure(strategyResponse);
     const readyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/ready`, { method: "POST", headers, body: "{}" });
-    if (!readyResponse.ok) return setRequestFailed(true);
-    setRequestFailed(false);
+    if (!readyResponse.ok) return reportRequestFailure(readyResponse);
+    clearRequestFailure();
     setScreen("waiting");
   }
 
   async function startTournament() {
     const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/admin/start`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${organizerToken}`, "Idempotency-Key": crypto.randomUUID() }, body: "{}" });
-    if (!response.ok) return setRequestFailed(true);
-    setRequestFailed(false);
+    if (!response.ok) return reportRequestFailure(response);
+    clearRequestFailure();
     tournamentStartedRef.current = true;
     setScreen("arena");
   }
@@ -570,10 +578,10 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${organizerToken}`, "Idempotency-Key": repeatCommandRef.current.key },
         body: JSON.stringify({ expected_run_id: run }),
       });
-      if (!response.ok) throw new Error("repeat failed");
-      setRequestFailed(false);
+      if (!response.ok) return reportRequestFailure(response);
+      clearRequestFailure();
       const snapshot = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${organizerToken}` } });
-      if (!snapshot.ok) throw new Error("snapshot failed");
+      if (!snapshot.ok) return reportRequestFailure(snapshot);
       const state = await snapshot.json() as OfficialState;
       if ((state.state_version ?? 0) >= latestVersionRef.current) {
         synchronizeRun(state);
@@ -583,7 +591,7 @@ export default function HomePage() {
         reconcilePresentation(latestVersionRef.current);
       }
       setScreen("arena");
-    } catch { setRequestFailed(true); }
+    } catch { reportRequestFailure(); }
     finally { repeatBusyRef.current = false; setRepeatBusy(false); }
   }
 
@@ -636,7 +644,7 @@ export default function HomePage() {
   async function playTraining(move: "rock" | "paper" | "scissors") {
     const before = trainingState;
     const response = await fetch(guestTraining ? "/api/v1/training/guest/choice" : `/api/v1/tournaments/${encodeURIComponent(code)}/training/choice`, { method: "POST", headers: { "Content-Type": "application/json", ...(guestTrainingId ? { "X-Training-Session": guestTrainingId } : {}), ...(!guestTraining ? { Authorization: `Bearer ${playerToken}` } : {}) }, body: JSON.stringify(guestTraining ? { move, hearts_required: guestHearts ?? 1, strategy } : { move }) });
-    if (!response.ok) return setRequestFailed(true);
+    if (!response.ok) return reportRequestFailure(response);
     const payload = await response.json();
     const nextState = payload.state as TrainingState;
     if (tournamentStartedRef.current) return;
@@ -645,7 +653,7 @@ export default function HomePage() {
     const lostHeart = (nextState.manual_hearts ?? 0) < (before?.manual_hearts ?? nextState.manual_hearts ?? 0) || (nextState.character_hearts ?? 0) < (before?.character_hearts ?? nextState.character_hearts ?? 0);
     if (lostHeart) audio?.effect("heart_lost");
     if (nextState.status === "completed") setScreen(guestTraining ? "guest-training-complete" : "training-complete");
-    setRequestFailed(false);
+    clearRequestFailure();
   }
 
   async function beginTraining(avatar: TrainingAvatar) {
@@ -654,16 +662,16 @@ export default function HomePage() {
     setTrainingAvatar(avatar);
     setTrainingState(null);
     const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/training/reset`, { method: "POST", headers: { Authorization: `Bearer ${playerToken}` } });
-    if (!response.ok) return setRequestFailed(true);
+    if (!response.ok) return reportRequestFailure(response);
     if (tournamentStartedRef.current) return;
-    setRequestFailed(false);
+    clearRequestFailure();
     setScreen("training");
   }
 
   function returnToWaiting() {
     setTrainingState(null);
     setTrainingAvatar(null);
-    setRequestFailed(false);
+    clearRequestFailure();
     setGuestTrainingId("");
     setGuestHearts(null);
     setHoveredGuestHearts(0);
@@ -677,17 +685,17 @@ export default function HomePage() {
     setHoveredGuestHearts(0);
     setTrainingState(null);
     setGuestTrainingId("");
-    setRequestFailed(false);
+    clearRequestFailure();
     setScreen("guest-strategy");
   }
 
   function startGuestTraining() {
-    if (!validStrategy || !trainingAvatar || !guestHearts) return setRequestFailed(true);
+    if (!validStrategy || !trainingAvatar || !guestHearts) return reportRequestFailure();
     startTrainingAudio();
     resetTrainingChampionCue(trainingChampionCueRef);
     setTrainingState(null);
     setGuestTrainingId("");
-    setRequestFailed(false);
+    clearRequestFailure();
     setScreen("guest-training");
   }
 
@@ -733,8 +741,8 @@ export default function HomePage() {
         </div>
         <div className="cta-row">
           <button className="button" onClick={() => setScreen("join")}>{t("join")}</button>
-          <button className="button secondary" onClick={() => { setRequestFailed(false); setScreen("create"); }}>{t("create")}</button>
-          <button className="button secondary" onClick={() => { tournamentStartedRef.current = false; setRequestFailed(false); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{u("guestTraining")}</button>
+          <button className="button secondary" onClick={() => { clearRequestFailure(); setScreen("create"); }}>{t("create")}</button>
+          <button className="button secondary" onClick={() => { tournamentStartedRef.current = false; clearRequestFailure(); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{u("guestTraining")}</button>
         </div>
       </div>
       <aside className="sponsor">
@@ -755,7 +763,7 @@ export default function HomePage() {
         <label className="audio-choice"><span>{t("sound")}</span><input type="checkbox" checked={soundEffectsEnabled} onChange={(event) => setSoundEffectsEnabled(event.target.checked)} /><b>{soundEffectsEnabled ? t("audioOn") : t("audioOff")}</b></label>
         <label className="audio-choice"><span>{t("music")}</span><input type="checkbox" checked={backgroundMusicEnabled} onChange={(event) => setBackgroundMusicEnabled(event.target.checked)} /><b>{backgroundMusicEnabled ? t("musicOn") : t("musicOff")}</b></label>
         <button className="button" disabled={createBusy} onClick={() => void createTournament()}>{t("create")}</button>
-        {requestFailed && <p className="notice">{createRateLimited ? u("createRateLimited") : t("network")}</p>}
+        {requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}
       </div>
     </section>}
 
@@ -795,14 +803,14 @@ export default function HomePage() {
         <label className="distribution">{u("scissors")}<input type="number" min="0" max="100" value={distribution.scissors} onChange={(event) => updateDistribution("scissors", Number(event.target.value))} /></label>
         <div className="toolbar strategy-actions"><button className="button secondary" onClick={randomize}>🎲 {u("random")}</button><button className="button secondary" onClick={randomizeAll}>🎲🎲 {u("randomAll")}</button></div>
         <p className={`total ${total === 100 ? "good" : "bad"}`}>{t("total")} {total}%</p>
-        {requestFailed && <p className="notice">{t("network")}</p>}
+        {requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}
         <button disabled={!validStrategy} className="button" onClick={() => screen === "guest-strategy" ? startGuestTraining() : void readyForTournament()}>{screen === "guest-strategy" ? u("startTraining") : t("ready")}</button>
       </div>
     </section>}
 
     {screen === "waiting" && <section>
       <h1 className="view-title">{u("waitingTitle")}</h1>
-      <div className="panel waiting-room"><p className="waiting-lead">{u("waitingOrganizer")}</p><ul className="waiting-checklist"><li>✓ {u("waitingRegistered")}</li><li>✓ {u("waitingReady")}</li><li>↻ {u("waitingNoRefresh")}</li><li>⚡ {u("waitingAutoStart")}</li></ul><p className="muted">{animal.emoji} {selectedAnimalName} · {name}</p>{requestFailed && <p className="notice">{t("network")}</p>}<button className="button" onClick={startAnimalRush}>{u("playAnimalRush")}</button></div>
+      <div className="panel waiting-room"><p className="waiting-lead">{u("waitingOrganizer")}</p><ul className="waiting-checklist"><li>✓ {u("waitingRegistered")}</li><li>✓ {u("waitingReady")}</li><li>↻ {u("waitingNoRefresh")}</li><li>⚡ {u("waitingAutoStart")}</li></ul><p className="muted">{animal.emoji} {selectedAnimalName} · {name}</p>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}<button className="button" onClick={startAnimalRush}>{u("playAnimalRush")}</button></div>
     </section>}
 
     {screen === "animal-rush" && <section className="rush-page">
@@ -840,13 +848,13 @@ export default function HomePage() {
             {[1, 2, 3, 4, 5].map((count) => <button key={count} type="button" className={count <= (hoveredGuestHearts || guestHearts || 0) ? "active" : ""} aria-label={`${u("heartsCount")}: ${count}`} onMouseEnter={() => setHoveredGuestHearts(count)} onFocus={() => setHoveredGuestHearts(count)} onBlur={() => setHoveredGuestHearts(0)} onClick={() => beginGuestTraining(trainingAvatar, count)}>♥</button>)}
           </div>
         </div> : <div className="avatar-catalog">{trainingAvatars.map((avatar) => <button key={avatar.id} type="button" className="avatar-choice" aria-label={u(avatar.label)} title={u(avatar.label)} onClick={() => screen === "guest-training-avatar" ? (setTrainingAvatar(avatar), setGuestHearts(null), setHoveredGuestHearts(0)) : void beginTraining(avatar)}><span aria-hidden="true">{avatar.emoji}</span></button>)}</div>}
-        {requestFailed && <p className="notice">{t("network")}</p>}<button className="button secondary" onClick={() => screen === "guest-training-avatar" ? (setTrainingAvatar(null), setGuestHearts(null), setHoveredGuestHearts(0), setScreen("guest-animal")) : returnToWaiting()}>{screen === "guest-training-avatar" ? u("returnAnimalSelection") : u("returnWaiting")}</button>
+        {requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}<button className="button secondary" onClick={() => screen === "guest-training-avatar" ? (setTrainingAvatar(null), setGuestHearts(null), setHoveredGuestHearts(0), setScreen("guest-animal")) : returnToWaiting()}>{screen === "guest-training-avatar" ? u("returnAnimalSelection") : u("returnWaiting")}</button>
       </div>
     </section>}
 
     {(screen === "training" || screen === "guest-training") && <section>
       <h1 className="view-title">{t("training")}</h1>
-      <div className="panel training-panel"><div className="training-fighters"><div><span>{trainingAvatar?.emoji ?? "🙂"}</span><b>{u("trainingYou")}</b></div><span>{u("versus")}</span><div><span>{animal.emoji}</span><b>{guestTraining ? selectedAnimalName : `${u("tournamentAnimal")}: ${selectedAnimalName}`}</b></div></div><div className="training-hearts"><span>{u("trainingYou")}: {hearts(trainingState?.manual_hearts)}</span><span>{selectedAnimalName}: {hearts(trainingState?.character_hearts)}</span></div><div className="toolbar training-actions"><button className="button secondary training-move" onClick={() => void playTraining("rock")}>🗿 {u("rock")}</button><button className="button secondary training-move" onClick={() => void playTraining("paper")}>📄 {u("paper")}</button><button className="button secondary training-move" onClick={() => void playTraining("scissors")}>✂️ {u("scissors")}</button></div>{trainingState && <div className="training-result"><b>{u("trainingResult")}</b>{trainingState.rounds?.at(-1) && <p>{u("trainingRound")} {trainingState.rounds.at(-1)?.number}: {u(trainingState.rounds.at(-1)?.manual_move ?? "rock")} {u("versus")} {u(trainingState.rounds.at(-1)?.character_move ?? "rock")}</p>}</div>}{requestFailed && <p className="notice">{t("network")}</p>}{!guestTraining && <button className="button secondary" onClick={returnToWaiting}>{u("returnWaiting")}</button>}</div>
+      <div className="panel training-panel"><div className="training-fighters"><div><span>{trainingAvatar?.emoji ?? "🙂"}</span><b>{u("trainingYou")}</b></div><span>{u("versus")}</span><div><span>{animal.emoji}</span><b>{guestTraining ? selectedAnimalName : `${u("tournamentAnimal")}: ${selectedAnimalName}`}</b></div></div><div className="training-hearts"><span>{u("trainingYou")}: {hearts(trainingState?.manual_hearts)}</span><span>{selectedAnimalName}: {hearts(trainingState?.character_hearts)}</span></div><div className="toolbar training-actions"><button className="button secondary training-move" onClick={() => void playTraining("rock")}>🗿 {u("rock")}</button><button className="button secondary training-move" onClick={() => void playTraining("paper")}>📄 {u("paper")}</button><button className="button secondary training-move" onClick={() => void playTraining("scissors")}>✂️ {u("scissors")}</button></div>{trainingState && <div className="training-result"><b>{u("trainingResult")}</b>{trainingState.rounds?.at(-1) && <p>{u("trainingRound")} {trainingState.rounds.at(-1)?.number}: {u(trainingState.rounds.at(-1)?.manual_move ?? "rock")} {u("versus")} {u(trainingState.rounds.at(-1)?.character_move ?? "rock")}</p>}</div>}{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{!guestTraining && <button className="button secondary" onClick={returnToWaiting}>{u("returnWaiting")}</button>}</div>
       {guestTraining && <div className="training-back-row"><button className="button secondary" onClick={returnToWaiting}>{u("returnAnimalSelection")}</button></div>}
     </section>}
 
@@ -857,14 +865,14 @@ export default function HomePage() {
 
     {screen === "organizer" && <section>
       <h1 className="view-title">{t("organizer")}</h1>
-<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice">{t("network")}</p>}{officialState ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participants.filter((participant) => participant.ready && !participant.removed).length < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
+<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{officialState ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participants.filter((participant) => participant.ready && !participant.removed).length < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
     </section>}
 
     {screen === "arena" && <section>
       {officialStartNotice && <p className="notice success official-start-notice">{u("tournamentStartedNotice")}</p>}
       <h1 className="view-title">{t("arena")}</h1>
       <CinematicArena state={officialState} events={officialEvents} queue={presentationQueue} revision={presentationRevision} movement={movementSpeed} countdown={countdownSpeed} audio={audio} emoji={playerEmoji} u={u} realtime={realtimeStatus} podiumControls={organizerToken && officialState?.status === "completed" && <div className="actions"><button className="button primary" disabled={repeatBusy || !officialState.run_id} onClick={() => void repeatTournament()}>🔄 {u("repeatTournament")}</button><button className="button" onClick={() => setScreen("organizer")}>{u("backToPanel")}</button></div>} />
-      {requestFailed && <p role="alert" className="notice">{t("network")}</p>}
+      {requestFailed && <p role="alert" className="notice">{requestFailureMessage}</p>}
     </section>}
   </main>;
 }

@@ -315,7 +315,10 @@ def test_admin_authorization_is_room_scoped_and_limits_invalid_credentials_befor
     for _ in range(17):  # Three administrative requests above consumed the IP budget.
         response = client.get(f"/v1/tournaments/{first_code}/admin/participants", headers=bearer("invalid"))
         assert response.status_code == 401
-    assert client.get(f"/v1/tournaments/{first_code}/admin/participants", headers=bearer("invalid")).status_code == 429
+    limited = client.get(f"/v1/tournaments/{first_code}/admin/participants", headers=bearer("invalid"))
+    assert limited.status_code == 429
+    assert limited.json()["detail"] == "Too many requests. Please try again later."
+    assert limited.headers["retry-after"].isdigit()
 
 
 def test_organizer_participant_list_exposes_membership_status_and_removal_history() -> None:
