@@ -7,7 +7,7 @@ Nenhuma conta, chave, domínio ou integração externa foi configurada pelo Boot
 | Node.js, Python e Docker | Necessária agora | Ambiente local e CI; não requer conta externa. |
 | PostgreSQL local | Necessária agora | Serviço Compose para desenvolvimento e testes de integração. |
 | GitHub Actions | Necessária durante os primeiros 10 dias | CI básico ao enviar o repositório ao GitHub; exige permissões do repositório, não segredos. |
-| Provedor de realtime (WebSockets próprios ou Supabase Realtime) | Necessária durante os primeiros 10 dias | Escolher uma única opção antes da integração; pode ser simulada até os contratos estabilizarem. |
+| Realtime | Já escolhido | WebSocket nativo do FastAPI, com PostgreSQL para ledger/replay e outbox. Supabase Realtime não é utilizado nesta fase. |
 | Vercel | Apenas no deploy | Hospedagem sugerida para o frontend; exige conta/projeto do proprietário. |
 | Supabase ou PostgreSQL gerenciado | Apenas no deploy | Banco e, se escolhido, realtime; exige projeto, acesso restrito e segredos fora do Git. |
 | Domínio, DNS e TLS | Apenas no deploy | Dependem do proprietário e da decisão de hospedagem. |

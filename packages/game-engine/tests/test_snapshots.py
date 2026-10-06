@@ -91,7 +91,7 @@ class TournamentSnapshotTests(unittest.TestCase):
         loaded_snapshot = json.loads(persisted_bytes.decode("utf-8"))
         restored = tournament_state_from_snapshot(loaded_snapshot)
 
-        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual(snapshot["kind"], "tournament_state")
         self.assertEqual(restored, original)
         self.assertIsNot(restored, original)
@@ -153,7 +153,7 @@ class TournamentSnapshotTests(unittest.TestCase):
 
         self.assertEqual(restored, state)
         self.assertEqual(len(restored.completed_rounds), 2)
-        self.assertEqual(restored.champion_id, PLAYER_ONE_ID)
+        self.assertEqual(restored.champion_id, PLAYER_TWO_ID)
 
     def test_reconstruction_deep_validates_forged_official_state(self) -> None:
         state = play_active_match_round(self._state(), ConstantRandom()).state
@@ -172,7 +172,7 @@ class TournamentSnapshotTests(unittest.TestCase):
         valid = tournament_state_to_snapshot(self._state())
         cases = (
             ("kind", "training_state", "snapshot.invalid_kind"),
-            ("schema_version", 2, "snapshot.unsupported_version"),
+            ("schema_version", 999, "snapshot.unsupported_version"),
         )
         for field, value, code in cases:
             payload = deepcopy(valid)
@@ -216,8 +216,8 @@ class TournamentSnapshotTests(unittest.TestCase):
 
     def test_rejects_duplicate_match_ids_across_bracket_rounds(self) -> None:
         state = self._state()
-        state = play_active_match_round(state, ConstantRandom()).state
-        state = play_active_match_round(state, ConstantRandom()).state
+        for _ in range(4):
+            state = play_active_match_round(state, ConstantRandom()).state
         self.assertTrue(state.completed_rounds)
         self.assertIsNotNone(state.current_round)
         assert state.current_round is not None

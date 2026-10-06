@@ -25,6 +25,7 @@ def start_tournament(
     competitors: tuple[Competitor, ...] | list[Competitor],
     hearts_per_match: int,
     random_source: RandomSource,
+    *, run_id: str | None = None,
 ) -> TournamentState:
     if not isinstance(tournament_id, str) or not tournament_id.strip():
         raise EngineValidationError(
@@ -55,15 +56,19 @@ def start_tournament(
         )
 
     current_round = _build_round(
-        tournament_id=tournament_id,
+        tournament_id=run_id or tournament_id,
         number=1,
         entrant_ids=tuple(player_ids),
         competitors=normalized,
         hearts_per_match=hearts_per_match,
         random_source=random_source,
     )
+    if current_round.bye_player_id is not None:
+        current_round = replace(current_round, waiting_player_id=current_round.bye_player_id, bye_player_id=None)
     state = TournamentState(
         tournament_id=tournament_id,
+        run_id=run_id,
+        podium_enabled=True,
         competitors=normalized,
         hearts_per_match=hearts_per_match,
         current_round=current_round,
@@ -108,6 +113,21 @@ def play_active_match_round(
     else:
         completed_match_id = active_match.match_id
         matches[active_index] = replace(updated_match, status=BracketMatchStatus.COMPLETED)
+        # Selection and creation are one immutable transition, persisted atomically.
+        # No restart can observe a chosen zombie without its official match.
+        if (current_round.waiting_player_id is not None
+                and current_round.second_chance_player_id is None
+                and all(match.status is BracketMatchStatus.COMPLETED for match in matches)):
+            losers = tuple(match.battle.loser_id for match in matches)
+            selected = losers[draw_index(len(losers), random_source)]
+            competitors = {competitor.player_id: competitor for competitor in state.competitors}
+            special_id = f"{state.run_id or state.tournament_id}:r1:second-chance"
+            matches.append(BracketMatch(
+                match_id=special_id, status=BracketMatchStatus.PENDING,
+                battle=start_match(special_id, competitors[selected],
+                    competitors[current_round.waiting_player_id], state.hearts_per_match),
+            ))
+            current_round = replace(current_round, second_chance_player_id=selected)
         pending_index = next(
             (
                 index
@@ -127,6 +147,7 @@ def play_active_match_round(
             finished_round = replace(current_round, matches=tuple(matches))
             advancing_ids = tuple(
                 bracket_match.battle.winner_id for bracket_match in matches
+                if not bracket_match.match_id.endswith(':third-place')
             )
             if any(player_id is None for player_id in advancing_ids):
                 raise EngineValidationError(
@@ -147,13 +168,21 @@ def play_active_match_round(
                 )
             else:
                 new_round = _build_round(
-                    tournament_id=state.tournament_id,
+                    tournament_id=state.run_id or state.tournament_id,
                     number=finished_round.number + 1,
                     entrant_ids=advancing_ids,
                     competitors=state.competitors,
                     hearts_per_match=state.hearts_per_match,
                     random_source=random_source,
                 )
+                if (state.podium_enabled and len(advancing_ids) == 2
+                        and len(finished_round.entrant_ids) == 4 and len(matches) == 2):
+                    loser_ids = tuple(m.battle.loser_id for m in matches)
+                    canonical = {c.player_id: c for c in state.competitors}
+                    bronze_id = f"{state.run_id or state.tournament_id}:r{new_round.number}:third-place"
+                    bronze = BracketMatch(bronze_id, BracketMatchStatus.ACTIVE,
+                        start_match(bronze_id, canonical[loser_ids[0]], canonical[loser_ids[1]], state.hearts_per_match))
+                    new_round = replace(new_round, matches=(bronze, replace(new_round.matches[0], status=BracketMatchStatus.PENDING)))
                 assigned_bye_player_id = new_round.bye_player_id
                 started_match_id = next(
                     bracket_match.match_id
@@ -288,7 +317,19 @@ def _validate_bracket_round(
             "Every round entrant must belong to the tournament.",
         )
 
-    expected_has_bye = len(entrant_ids) % 2 == 1
+    waiting = bracket_round.waiting_player_id
+    zombie = bracket_round.second_chance_player_id
+    bronze_expected = (state.podium_enabled and expected_number > 1 and len(entrant_ids) == 2
+        and len(state.completed_rounds[expected_number - 2].entrant_ids) == 4
+        and len(state.completed_rounds[expected_number - 2].matches) == 2)
+    if waiting is not None and (expected_number != 1 or len(entrant_ids) % 2 != 1
+            or waiting not in entrant_ids or bracket_round.bye_player_id is not None):
+        raise EngineValidationError("tournament.invalid_waiting", "Waiting is only valid in the initial odd round.")
+    if zombie is not None and waiting is None:
+        raise EngineValidationError("tournament.invalid_second_chance", "Second Chance requires a waiting participant.")
+    if expected_number == 1 and set(entrant_ids) != {c.player_id for c in state.competitors}:
+        raise EngineValidationError("tournament.invalid_initial_entrants", "Initial round must include every competitor.")
+    expected_has_bye = len(entrant_ids) % 2 == 1 and waiting is None
     if expected_has_bye != (bracket_round.bye_player_id is not None):
         raise EngineValidationError(
             "tournament.invalid_bye",
@@ -299,7 +340,7 @@ def _validate_bracket_round(
             "tournament.invalid_bye",
             "The BYE recipient must be an entrant in the round.",
         )
-    if len(bracket_round.matches) != len(entrant_ids) // 2:
+    if len(bracket_round.matches) != len(entrant_ids) // 2 + (1 if zombie is not None else 0) + int(bronze_expected):
         raise EngineValidationError(
             "tournament.invalid_match_count",
             "The bracket match count does not cover the round entrants.",
@@ -310,6 +351,10 @@ def _validate_bracket_round(
     }
     paired_ids: list[str] = []
     for bracket_match in bracket_round.matches:
+        if state.run_id and not bracket_match.match_id.startswith(f"{state.run_id}:r{expected_number}:"):
+            raise EngineValidationError("tournament.invalid_match_id", "Match does not belong to this execution and bracket round.")
+        if bracket_match.match_id.endswith(":third-place") and (not bronze_expected or bracket_match != bracket_round.matches[0]):
+            raise EngineValidationError("tournament.invalid_bronze", "Unexpected bronze match.")
         if not isinstance(bracket_match.status, BracketMatchStatus):
             raise EngineValidationError(
                 "tournament.invalid_match_status",
@@ -362,6 +407,27 @@ def _validate_bracket_round(
             )
 
     expected_paired_ids = set(entrant_ids)
+    if bronze_expected:
+        bronze = bracket_round.matches[0]
+        semifinal = state.completed_rounds[expected_number - 2]
+        losers = tuple(m.battle.loser_id for m in semifinal.matches)
+        if (bronze.match_id != f"{state.run_id or state.tournament_id}:r{expected_number}:third-place"
+                or tuple(paired_ids[:2]) != losers):
+            raise EngineValidationError("tournament.invalid_bronze", "Bronze requires exactly the two semifinal losers.")
+        paired_ids = paired_ids[2:]
+    if waiting is not None:
+        expected_paired_ids.remove(waiting)
+    if zombie is not None:
+        ordinary = bracket_round.matches[:-1]
+        special = bracket_round.matches[-1]
+        if (any(m.status is not BracketMatchStatus.COMPLETED for m in ordinary)
+                or zombie not in tuple(m.battle.loser_id for m in ordinary)
+                or special.match_id != f"{state.run_id or state.tournament_id}:r1:second-chance"
+                or (special.battle.player_one.player_id, special.battle.player_two.player_id) != (zombie, waiting)):
+            raise EngineValidationError("tournament.invalid_second_chance", "Only one initial loser can return against the waiting participant.")
+        paired_ids = paired_ids[:-2]
+    elif waiting is not None and require_completed:
+        raise EngineValidationError("tournament.missing_second_chance", "The initial round must include Second Chance before advancing.")
     if bracket_round.bye_player_id is not None:
         expected_paired_ids.remove(bracket_round.bye_player_id)
     if len(paired_ids) != len(set(paired_ids)) or set(paired_ids) != expected_paired_ids:
@@ -395,7 +461,7 @@ def _validate_bracket_round(
 
 
 def _advancing_ids(bracket_round: BracketRoundState) -> tuple[str, ...]:
-    winner_ids = tuple(match.battle.winner_id for match in bracket_round.matches)
+    winner_ids = tuple(match.battle.winner_id for match in bracket_round.matches if not match.match_id.endswith(':third-place'))
     if any(winner_id is None for winner_id in winner_ids):
         raise EngineValidationError(
             "tournament.missing_match_winner",

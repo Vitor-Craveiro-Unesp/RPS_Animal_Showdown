@@ -29,8 +29,8 @@ Cada participante:
 2. informa seu nome;
 3. escolhe um animal em um mapa-múndi;
 4. configura sua estratégia de Pedra, Papel e Tesoura;
-5. pode utilizar o modo Treino;
-6. aguarda o organizador iniciar;
+5. pode utilizar o modo Treinar livre pela Home;
+6. após READY, aguarda o organizador e pode jogar Animal Rush;
 7. acompanha os duelos e o chaveamento em tempo real.
 
 ## Estratégia
@@ -85,6 +85,14 @@ Quando todos os corações acabam, o personagem é eliminado.
 
 ## Torneio
 
+Qualquer pessoa pode criar um torneio sem cadastro, e-mail, senha ou Google
+Auth. Ao criar, o backend emite uma capability secreta do organizador: o
+navegador do criador a guarda apenas na sessão local e a apresenta ao backend
+para iniciar, alterar ou repetir o torneio. O código público da sala permite
+somente a entrada de participantes e nunca concede privilégios administrativos.
+Se a sessão local for apagada ou o criador trocar de navegador, não há
+recuperação de organizador no MVP.
+
 O organizador define quando o torneio começa.
 
 A capacidade da sala representa apenas o número máximo de jogadores.
@@ -96,7 +104,7 @@ Uma sala para 10 pessoas poderá começar, por exemplo, com:
 - 9;
 - 10.
 
-Se houver número ímpar de participantes, o sistema trata automaticamente o BYE.
+Novos torneios inicialmente ímpares usam a Segunda Chance Zumbi: um participante aguarda e enfrenta um dos perdedores iniciais sorteado pelo servidor. O vencedor segue; fases posteriores ímpares usam BYE local à fase. Consulte [Rodada 6.6](docs/round-6-6-report.md).
 
 Um torneio exige pelo menos **2 participantes confirmados** para iniciar. A capacidade da sala continua sendo apenas o limite máximo.
 
@@ -116,17 +124,13 @@ Mostra os participantes avançando e os eliminados permanecendo onde perderam.
 
 Mostra acontecimentos importantes da competição.
 
-## Modo Treino
+## Treinar livre e Animal Rush
 
-Depois de configurar sua estratégia, o jogador pode treinar enquanto aguarda.
+O botão **Treinar** da Home oferece prática livre de Pedra, Papel e Tesoura sem exigir código de torneio.
 
-No Treino:
+Depois de configurar a estratégia oficial e confirmar READY, o participante entra na Sala de Espera e pode jogar **Animal Rush**. Nesse minigame local, deve escolher rapidamente o símbolo que vence Pedra, Papel ou Tesoura. Pontuação, sequência e dificuldade pertencem apenas ao minigame e nunca alteram o estado competitivo.
 
-- o usuário escolhe Pedra, Papel ou Tesoura manualmente;
-- o próprio personagem responde usando sua estratégia configurada;
-- são utilizadas as mesmas regras de vida do torneio.
-
-O Treino não altera resultados oficiais.
+O canal realtime permanece ativo durante o Animal Rush. Quando o servidor inicia o torneio, os timers e o estado transitório do minigame são descartados e a interface muda imediatamente para a Arena oficial.
 
 ## Áudio
 
@@ -258,3 +262,10 @@ O plano de execução e os limites de trabalho por agente estão em [docs/v0.1-p
 ## Licença
 
 A definir.
+### Pódio e repetição
+
+Torneios novos incluem bronze antes da final quando há duas semifinais.
+Após o pódio, o organizador pode repetir com os mesmos inscritos/configurações
+em uma nova execução independente, mantendo o histórico anterior.
+Aplicar a migração 0006 antes de iniciar o backend atualizado.
+Veja [contratos de pódio e runs](docs/podium-and-runs.md).

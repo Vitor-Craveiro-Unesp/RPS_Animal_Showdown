@@ -12,6 +12,7 @@ import logging
 from hashlib import sha256
 from os import getenv
 from typing import Annotated
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
@@ -28,11 +29,14 @@ from .engine_gateway import (
 from .models import (
     CreateTournamentIntent,
     EmptyIntent,
+    RepeatTournamentIntent,
+    GuestTrainingChoiceIntent,
     JoinTournamentIntent,
     StrategyIntent,
     TournamentConfigurationIntent,
     TrainingChoiceIntent,
 )
+from .public_state import official_state_view
 from .security import (
     PostgresFixedWindowRateLimiter,
     RateLimit,
@@ -57,13 +61,16 @@ RATE_LIMITS = {
     "strategy": RateLimit(max_requests=20, window_seconds=60),
     "admin": RateLimit(max_requests=20, window_seconds=60),
     "training": RateLimit(max_requests=30, window_seconds=60),
+    "guest_training": RateLimit(max_requests=30, window_seconds=60),
     # This is deliberately checked before participant capability lookup so a
     # stream of invalid bearer values cannot brute-force the room boundary.
+    "player_auth_ip": RateLimit(max_requests=120, window_seconds=60),
     "player_auth": RateLimit(max_requests=20, window_seconds=60),
     "realtime": RateLimit(max_requests=30, window_seconds=60),
 }
 
 DEFAULT_ALLOWED_ORIGINS = ("http://localhost:3000",)
+PRODUCTION_ENVIRONMENT = "production"
 logger = logging.getLogger(__name__)
 
 
@@ -96,10 +103,16 @@ class RealtimeRateLimitMiddleware:
 def _allowed_origins() -> tuple[str, ...]:
     configured = getenv("ALLOWED_ORIGINS")
     if not configured:
+        if getenv("APP_ENV", "development").strip().lower() == PRODUCTION_ENVIRONMENT:
+            raise RuntimeError("ALLOWED_ORIGINS is required when APP_ENV=production.")
         return DEFAULT_ALLOWED_ORIGINS
     origins = tuple(origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip())
     if not origins or "*" in origins:
         raise RuntimeError("ALLOWED_ORIGINS must contain one or more explicit origins.")
+    for origin in origins:
+        parsed = urlparse(origin)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.params or parsed.query or parsed.fragment:
+            raise RuntimeError("ALLOWED_ORIGINS must contain absolute HTTP(S) origins without paths.")
     return origins
 
 
@@ -137,6 +150,8 @@ def _player_view(player: PlayerRecord) -> dict[str, object]:
         "animal_id": player.animal_id,
         "ready": player.ready,
         "strategy_locked": player.strategy_locked,
+        "membership_status": player.membership_status,
+        "removed": player.removed,
     }
 
 
@@ -153,6 +168,12 @@ def create_app(
             "Pass an explicit InMemoryTournamentStore only to isolated unit tests."
         )
     tournament_store = store or PostgresTournamentStore(database_url)
+    logger.info(
+        "application configured environment=%s durable_store=%s",
+        getenv("APP_ENV", "development").strip().lower(),
+        isinstance(tournament_store, PostgresTournamentStore),
+    )
+    guest_training_sessions: dict[str, object] = {}
     rate_limiter: RateLimiter = limiter or (
         PostgresFixedWindowRateLimiter(database_url or "")
         if isinstance(tournament_store, PostgresTournamentStore)
@@ -210,12 +231,30 @@ def create_app(
         authorization: Annotated[str | None, Header()] = None,
     ) -> tuple[TournamentRecord, PlayerRecord]:
         credential = _credential_from_header(authorization)
-        limit(request, "player_auth")
+        limit(request, "player_auth_ip")
         limit(request, "player_auth", _credential_subject(credential))
         try:
             return tournament_store.authorize_player(code.upper(), credential)
         except StoreError as error:
             _raise_store_error(error)
+
+    def require_room(
+        code: str,
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> TournamentRecord:
+        """Authorize either room capability without turning a view into public data."""
+        credential = _credential_from_header(authorization)
+        limit(request, "player_auth_ip")
+        limit(request, "player_auth", _credential_subject(credential))
+        try:
+            return tournament_store.authorize_organizer(code.upper(), credential)
+        except StoreError:
+            try:
+                tournament, _ = tournament_store.authorize_player(code.upper(), credential)
+                return tournament
+            except StoreError as error:
+                _raise_store_error(error)
 
     realtime_ticket_codec = None
     if isinstance(tournament_store, PostgresTournamentStore):
@@ -253,19 +292,36 @@ def create_app(
                     published = False
                 await asyncio.sleep(0.05 if published else 0.5)
 
+        async def advance_competition() -> None:
+            """Resume durable running tournaments one official Engine round at a time."""
+            while True:
+                try:
+                    progressed = await asyncio.to_thread(
+                        tournament_store.advance_one_running_tournament, engine_gateway
+                    )
+                except Exception as error:
+                    app.state.competition_last_error = type(error).__name__
+                    logger.exception("official competition transition failed")
+                    progressed = False
+                await asyncio.sleep(0.1 if progressed else 0.5)
+
         @app.on_event("startup")
         async def start_outbox_worker() -> None:
             app.state.outbox_task = asyncio.create_task(drain_outbox())
+            app.state.competition_task = asyncio.create_task(advance_competition())
+            logger.info("durable realtime and competition workers started")
 
         @app.on_event("shutdown")
         async def stop_outbox_worker() -> None:
-            task = getattr(app.state, "outbox_task", None)
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            for task_name in ("competition_task", "outbox_task"):
+                task = getattr(app.state, task_name, None)
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            logger.info("durable realtime and competition workers stopped")
 
     @app.get("/health", tags=["system"])
     def healthcheck() -> dict[str, str]:
@@ -282,6 +338,7 @@ def create_app(
             movement_speed=intent.movement_speed,
             countdown_speed=intent.countdown_speed,
         )
+        logger.info("tournament created tournament_id=%s", tournament.id)
         # This is the only response that contains the organizer capability.
         return {
             "tournament_id": tournament.id,
@@ -374,7 +431,7 @@ def create_app(
         limit(request, "training")
         limit(request, "training", _credential_subject(credential))
         tournament, player = room
-        if tournament.started or player.strategy is None:
+        if tournament.started or not player.ready or player.strategy is None:
             raise HTTPException(status_code=409, detail="Training is not available.")
         session = tournament_store.training_session_for(tournament, player)
         command = TrainingChoiceCommand(
@@ -395,13 +452,61 @@ def create_app(
             _raise_store_error(error)
         return {"training_id": result.training_id, "state": result.snapshot}
 
+    @app.post("/v1/training/guest/choice", tags=["training"])
+    def submit_guest_training_choice(
+        intent: GuestTrainingChoiceIntent,
+        request: Request,
+        training_session: Annotated[str | None, Header(alias="X-Training-Session")] = None,
+    ) -> object:
+        """Run a server-calculated, non-persistent practice without a room."""
+        limit(request, "guest_training")
+        session_id = training_session if training_session in guest_training_sessions else str(uuid4())
+        command = TrainingChoiceCommand(
+            training_id=session_id,
+            player_id="guest-character",
+            hearts_required=intent.hearts_required,
+            strategy=intent.strategy.model_dump(),
+            move=intent.move,
+            state=guest_training_sessions.get(session_id),
+        )
+        try:
+            result = engine_gateway.run_training_choice(command)
+        except EngineUnavailable as error:
+            raise HTTPException(status_code=503, detail="Training is temporarily unavailable.") from error
+        if result.snapshot.get("status") == "completed":
+            guest_training_sessions.pop(session_id, None)
+        else:
+            guest_training_sessions[session_id] = result.state
+        return {"training_id": result.training_id, "state": result.snapshot}
+
+    @app.post("/v1/tournaments/{code}/training/reset", status_code=status.HTTP_204_NO_CONTENT, tags=["training"])
+    def reset_training(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+        room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
+    ) -> Response:
+        """Start a fresh isolated practice session after a previous simulation."""
+        credential = _credential_from_header(authorization)
+        limit(request, "training")
+        limit(request, "training", _credential_subject(credential))
+        tournament, player = room
+        if tournament.started or not player.ready or player.strategy is None:
+            raise HTTPException(status_code=409, detail="Training is not available.")
+        try:
+            tournament_store.clear_training_session(tournament, player)
+        except StoreError as error:
+            _raise_store_error(error)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.get("/v1/tournaments/{code}/admin/participants", tags=["admin"])
     def list_participants(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
         tournament: TournamentRecord = Depends(require_organizer),
     ) -> dict[str, object]:
-        participants = [_player_view(player) for player in tournament.players.values() if not player.removed]
+        # Keep removals visible to the organizer as room history. They remain
+        # excluded from capacity and from the confirmed-player start rule.
+        participants = [_player_view(player) for player in tournament.players.values()]
         return {"tournament_id": tournament.id, "tournament_code": tournament.code, "participants": participants}
 
     @app.patch("/v1/tournaments/{code}/admin/configuration", tags=["admin"])
@@ -469,12 +574,14 @@ def create_app(
         credential = _credential_from_header(authorization)
         if isinstance(tournament_store, PostgresTournamentStore):
             try:
-                return tournament_store.start_tournament_atomic(
+                result = tournament_store.start_tournament_atomic(
                     code=tournament.code,
                     credential=credential,
                     idempotency_key=idempotency_key,
                     engine=engine_gateway,
                 )
+                logger.info("tournament start processed tournament_id=%s", tournament.id)
+                return result
             except EngineUnavailable as error:
                 raise HTTPException(status_code=503, detail="Official tournament start is temporarily unavailable.") from error
             except StoreError as error:
@@ -503,11 +610,30 @@ def create_app(
             )
         except StoreError as error:
             _raise_store_error(error)
+        logger.info("tournament start processed tournament_id=%s", tournament.id)
         return {
             "status": "started",
             "tournament_id": tournament.id,
             "state_reference": result.state_reference,
         }
+
+    @app.post("/v1/tournaments/{code}/admin/repeat", tags=["admin"])
+    def repeat_tournament(
+        intent: RepeatTournamentIntent,
+        authorization: Annotated[str | None, Header()] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        tournament: TournamentRecord = Depends(require_organizer),
+    ) -> dict[str, object]:
+        if not isinstance(tournament_store, PostgresTournamentStore):
+            raise HTTPException(status_code=503, detail="Repeating requires durable persistence.")
+        try:
+            return tournament_store.repeat_tournament_atomic(code=tournament.code,
+                credential=_credential_from_header(authorization),idempotency_key=idempotency_key,
+                expected_run_id=intent.expected_run_id,engine=engine_gateway)
+        except StoreError as error:
+            _raise_store_error(error)
+        except EngineUnavailable as error:
+            raise HTTPException(status_code=503, detail="New execution is temporarily unavailable.") from error
 
     @app.post("/v1/tournaments/{code}/realtime/ticket", tags=["realtime"])
     def issue_realtime_ticket(
@@ -525,6 +651,32 @@ def create_app(
         except StoreError as error:
             _raise_store_error(error)
         return {"ticket": ticket, "expires_at": expires_at.isoformat()}
+
+    @app.get("/v1/tournaments/{code}/official-state", tags=["tournaments"])
+    def get_official_state(
+        tournament: TournamentRecord = Depends(require_room),
+    ) -> dict[str, object]:
+        """Authenticated fallback snapshot for replay gaps and reconnects.
+
+        This is intentionally a server-produced public projection, never the
+        canonical Engine document that holds private strategies.
+        """
+        if not tournament.started:
+            raise HTTPException(status_code=409, detail="Official tournament state is not available.")
+        try:
+            if isinstance(tournament_store, PostgresTournamentStore):
+                snapshot, state_version, start_sequence = tournament_store.official_state_snapshot_for(tournament)
+            else:
+                snapshot = tournament.official_state_snapshot
+                state_version = None
+            if snapshot is None:
+                raise StoreError("Official tournament state is not available.")
+            public = official_state_view(tournament, snapshot, state_version=state_version)
+            if isinstance(tournament_store, PostgresTournamentStore):
+                public["run_start_sequence"] = start_sequence
+            return public
+        except StoreError as error:
+            _raise_store_error(error)
 
     @app.post("/v1/tournaments/{code}/admin/access/revoke", status_code=status.HTTP_204_NO_CONTENT, tags=["admin"])
     def revoke_organizer_access(

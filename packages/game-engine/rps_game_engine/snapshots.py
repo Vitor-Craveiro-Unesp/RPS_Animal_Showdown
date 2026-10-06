@@ -26,7 +26,7 @@ from .models import (
 from .tournament import validate_tournament_state
 
 
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 3
 TOURNAMENT_SNAPSHOT_KIND = "tournament_state"
 
 
@@ -104,29 +104,44 @@ def tournament_state_to_snapshot(state: TournamentState) -> dict[str, object]:
             "snapshot.noncanonical_uuid",
             "Tournament and player IDs must already use canonical UUID strings.",
         )
-    return {
-        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+    first_round = state.completed_rounds[0] if state.completed_rounds else state.current_round
+    legacy = first_round is not None and first_round.bye_player_id is not None
+    def round_payload(round_: BracketRoundState) -> dict[str, object]:
+        payload = _bracket_round_to_payload(round_)
+        if legacy:
+            payload.pop("waiting_player_id")
+            payload.pop("second_chance_player_id")
+        return payload
+    result = {
+        "schema_version": 3 if state.podium_enabled else 1 if legacy else 2,
         "kind": TOURNAMENT_SNAPSHOT_KIND,
         "tournament_id": tournament_id,
         "competitors": [_competitor_to_payload(competitor) for competitor in state.competitors],
         "hearts_per_match": state.hearts_per_match,
         "current_round": (
-            _bracket_round_to_payload(state.current_round)
+            round_payload(state.current_round)
             if state.current_round is not None
             else None
         ),
         "completed_rounds": [
-            _bracket_round_to_payload(round_) for round_ in state.completed_rounds
+            round_payload(round_) for round_ in state.completed_rounds
         ],
         "status": state.status.value,
         "champion_id": state.champion_id,
     }
+    if state.podium_enabled:
+        result.update(run_id=state.run_id, first_place=state.first_place,
+            second_place=state.second_place, third_place=state.third_place)
+    return result
 
 
 def tournament_state_from_snapshot(snapshot: object) -> TournamentState:
     """Reconstruct and deep-validate a persisted official snapshot."""
 
     source = _object(snapshot, "snapshot")
+    if "schema_version" in source and source["schema_version"] not in (1, 2, SNAPSHOT_SCHEMA_VERSION):
+        raise EngineValidationError("snapshot.unsupported_version", "The snapshot schema version is not supported.")
+    extras = {"run_id", "first_place", "second_place", "third_place"} if source.get("schema_version") == 3 else set()
     _fields(
         source,
         {
@@ -139,11 +154,11 @@ def tournament_state_from_snapshot(snapshot: object) -> TournamentState:
             "completed_rounds",
             "status",
             "champion_id",
-        },
+        } | extras,
         "snapshot",
     )
     schema_version = _integer(source["schema_version"], "schema_version")
-    if schema_version != SNAPSHOT_SCHEMA_VERSION:
+    if schema_version not in (1, 2, SNAPSHOT_SCHEMA_VERSION):
         raise EngineValidationError(
             "snapshot.unsupported_version",
             "The snapshot schema version is not supported.",
@@ -173,14 +188,16 @@ def tournament_state_from_snapshot(snapshot: object) -> TournamentState:
     current_round = (
         None
         if current_payload is None
-        else _bracket_round_from_payload(current_payload, competitor_by_id)
+        else _bracket_round_from_payload(current_payload, competitor_by_id, schema_version)
     )
     completed_rounds = tuple(
-        _bracket_round_from_payload(item, competitor_by_id)
+        _bracket_round_from_payload(item, competitor_by_id, schema_version)
         for item in _array(source["completed_rounds"], "completed_rounds")
     )
     state = TournamentState(
         tournament_id=tournament_id,
+        run_id=_optional_uuid(source.get("run_id"), "run_id"),
+        podium_enabled=schema_version == 3,
         competitors=competitors,
         hearts_per_match=_integer(source["hearts_per_match"], "hearts_per_match"),
         current_round=current_round,
@@ -189,6 +206,11 @@ def tournament_state_from_snapshot(snapshot: object) -> TournamentState:
         champion_id=_optional_uuid(source["champion_id"], "champion_id"),
     )
     validate_tournament_state(state)
+    first_round = completed_rounds[0] if completed_rounds else current_round
+    if schema_version >= 2 and len(competitors) % 2 and first_round.waiting_player_id is None:
+        raise EngineValidationError("snapshot.invalid_ruleset", "Version 2 odd tournaments require Second Chance.")
+    if schema_version == 3 and any(source[k] != getattr(state, k) for k in ("first_place", "second_place", "third_place")):
+        raise EngineValidationError("snapshot.invalid_podium", "Podium must agree with official matches.")
     return state
 
 
@@ -331,6 +353,8 @@ def _match_from_payload(
 
 def _bracket_round_to_payload(round_: BracketRoundState) -> dict[str, object]:
     return {
+        "waiting_player_id": round_.waiting_player_id,
+        "second_chance_player_id": round_.second_chance_player_id,
         "number": round_.number,
         "entrant_ids": list(round_.entrant_ids),
         "bye_player_id": round_.bye_player_id,
@@ -348,9 +372,13 @@ def _bracket_round_to_payload(round_: BracketRoundState) -> dict[str, object]:
 def _bracket_round_from_payload(
     payload: object,
     competitor_by_id: dict[str, Competitor],
+    schema_version: int,
 ) -> BracketRoundState:
     source = _object(payload, "bracket_round")
-    _fields(source, {"number", "entrant_ids", "bye_player_id", "matches"}, "bracket_round")
+    expected = {"number", "entrant_ids", "bye_player_id", "matches"}
+    if schema_version >= 2:
+        expected |= {"waiting_player_id", "second_chance_player_id"}
+    _fields(source, expected, "bracket_round")
     matches: list[BracketMatch] = []
     for item in _array(source["matches"], "matches"):
         match_source = _object(item, "bracket_match")
@@ -363,6 +391,8 @@ def _bracket_round_from_payload(
             )
         )
     return BracketRoundState(
+        waiting_player_id=_optional_uuid(source.get("waiting_player_id"), "waiting_player_id"),
+        second_chance_player_id=_optional_uuid(source.get("second_chance_player_id"), "second_chance_player_id"),
         number=_integer(source["number"], "bracket_round.number"),
         entrant_ids=tuple(
             _known_player_id(item, competitor_by_id, "entrant_id")

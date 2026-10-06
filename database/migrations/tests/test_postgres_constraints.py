@@ -210,3 +210,20 @@ class PostgresMigrationIntegrationTests(unittest.TestCase):
             self.assertEqual(cursor.fetchone()[0], "realtime_access_tickets")
             cursor.execute("SELECT to_regclass('public.shared_rate_limit_buckets')")
             self.assertEqual(cursor.fetchone()[0], "shared_rate_limit_buckets")
+    def test_run_history_blocks_downgrade_and_cross_room_pointer(self) -> None:
+        room_a, room_b, run_id = uuid4(), uuid4(), uuid4()
+        with self.connection() as connection, connection.cursor() as cursor:
+            self.insert_tournament(cursor, room_a)
+            self.insert_tournament(cursor, room_b)
+            cursor.execute("INSERT INTO tournament_runs(id,tournament_id,number,start_sequence,state_document) VALUES(%s,%s,1,1,'{}')", (run_id,room_a))
+            cursor.execute("SAVEPOINT invalid_run_pointer")
+            with self.assertRaises(Exception):
+                cursor.execute("UPDATE tournaments SET current_run_id=%s WHERE id=%s", (run_id,room_b))
+            cursor.execute("ROLLBACK TO SAVEPOINT invalid_run_pointer")
+        environment = dict(os.environ, DATABASE_URL=to_sqlalchemy_url(str(TEST_DATABASE_URL)))
+        result = subprocess.run([sys.executable,"-m","alembic","downgrade","0005_competition_schedule"], cwd=MIGRATIONS,env=environment,capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("Run history is not safely downgradeable",result.stderr)
+        with self.connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM tournament_runs WHERE id=%s",(run_id,))
+            self.assertEqual(cursor.fetchone()[0],1)

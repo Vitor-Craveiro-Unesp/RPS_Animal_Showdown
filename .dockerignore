@@ -3,6 +3,8 @@
 node_modules
 .next
 coverage
+*.log
+*.tsbuildinfo
 .venv
 venv
 __pycache__

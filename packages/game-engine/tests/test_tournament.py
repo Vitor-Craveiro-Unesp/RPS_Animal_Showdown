@@ -18,7 +18,7 @@ from .helpers import ConstantRandom, SequenceRandom, competitor
 
 
 class TournamentTests(unittest.TestCase):
-    def test_odd_round_assigns_exactly_one_random_bye(self) -> None:
+    def test_odd_round_assigns_exactly_one_random_waiting_player(self) -> None:
         competitors = (
             competitor("a", Move.ROCK),
             competitor("b", Move.SCISSORS),
@@ -26,26 +26,28 @@ class TournamentTests(unittest.TestCase):
         )
         state = start_tournament("t1", competitors, 1, SequenceRandom((0.5,)))
 
-        self.assertEqual(state.current_round.bye_player_id, "b")  # type: ignore[union-attr]
+        self.assertIsNone(state.current_round.bye_player_id)
+        self.assertEqual(state.current_round.waiting_player_id, "b")
         self.assertEqual(len(state.current_round.matches), 1)  # type: ignore[union-attr]
         battle = state.current_round.matches[0].battle  # type: ignore[union-attr]
         self.assertEqual((battle.player_one.player_id, battle.player_two.player_id), ("a", "c"))
 
-    def test_bye_player_and_match_winner_advance_to_a_champion(self) -> None:
+    def test_waiting_player_and_zombie_play_before_advancing(self) -> None:
         competitors = (
             competitor("a", Move.ROCK),
-            competitor("b", Move.SCISSORS),
+            competitor("b", Move.PAPER),
             competitor("c", Move.SCISSORS),
         )
-        random_source = SequenceRandom((0.5, 0.0, 0.0, 0.0, 0.0))
+        random_source = SequenceRandom((0.5, *([0.0] * 7)))
         state = start_tournament("t2", competitors, 1, random_source)
 
         semifinal = play_active_match_round(state, random_source)
         self.assertEqual(semifinal.completed_match_id, "t2:r1:m1")
-        self.assertEqual(semifinal.started_match_id, "t2:r2:m1")
-        self.assertEqual(semifinal.state.current_round.entrant_ids, ("a", "b"))  # type: ignore[union-attr]
+        self.assertEqual(semifinal.started_match_id, "t2:r1:second-chance")
+        second_chance = play_active_match_round(semifinal.state, random_source)
+        self.assertEqual(second_chance.state.current_round.entrant_ids, ("a", "c"))
 
-        final = play_active_match_round(semifinal.state, random_source)
+        final = play_active_match_round(second_chance.state, random_source)
         self.assertIs(final.state.status, TournamentStatus.COMPLETED)
         self.assertEqual(final.champion_id, "a")
         self.assertEqual(final.state.champion_id, "a")
@@ -77,7 +79,10 @@ class TournamentTests(unittest.TestCase):
         self.assertEqual(completed_losers, ("b", "d"))
         self.assertEqual(second.state.current_round.entrant_ids, ("a", "c"))  # type: ignore[union-attr]
 
-        final = play_active_match_round(second.state, ConstantRandom())
+        bronze = play_active_match_round(second.state, ConstantRandom())
+        self.assertIsNone(bronze.state.champion_id)
+        self.assertEqual(bronze.state.third_place, "d")
+        final = play_active_match_round(bronze.state, ConstantRandom())
         self.assertEqual(final.state.champion_id, "c")
 
     def test_rejects_duplicate_or_insufficient_competitors(self) -> None:

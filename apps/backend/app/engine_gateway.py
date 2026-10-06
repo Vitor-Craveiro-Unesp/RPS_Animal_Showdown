@@ -20,6 +20,8 @@ from rps_game_engine import (
     SystemRandomSource,
     TournamentState,
     TrainingState,
+    TournamentTransition,
+    play_active_match_round,
     play_training_round,
     start_tournament,
     start_training,
@@ -40,6 +42,7 @@ class StartTournamentCommand:
     tournament_id: str
     hearts_required: int
     players: tuple[EnginePlayerSnapshot, ...]
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,12 @@ class EngineStartResult:
 
 
 @dataclass(frozen=True)
+class EngineAdvanceResult:
+    transition: TournamentTransition
+    snapshot: dict[str, object]
+
+
+@dataclass(frozen=True)
 class TrainingChoiceResult:
     training_id: str
     state: TrainingState
@@ -72,6 +81,8 @@ class EngineUnavailable(Exception):
 
 class GameEngineGateway(Protocol):
     def start_tournament(self, command: StartTournamentCommand) -> EngineStartResult: ...
+
+    def advance_tournament(self, snapshot: object) -> EngineAdvanceResult: ...
 
     def run_training_choice(self, command: TrainingChoiceCommand) -> TrainingChoiceResult: ...
 
@@ -94,6 +105,7 @@ class GameEngineAdapter:
                 competitors=competitors,
                 hearts_per_match=command.hearts_required,
                 random_source=SystemRandomSource(),
+                run_id=command.run_id,
             )
         except (EngineError, EngineUnavailable) as error:
             raise EngineUnavailable("The official Game Engine rejected the server snapshot.") from error
@@ -112,6 +124,18 @@ class GameEngineAdapter:
             return tournament_state_from_snapshot(snapshot)
         except EngineError as error:
             raise EngineUnavailable("The persisted official snapshot is invalid.") from error
+
+    def advance_tournament(self, snapshot: object) -> EngineAdvanceResult:
+        """Resolve one official round from durable state using the canonical Engine."""
+        try:
+            state = tournament_state_from_snapshot(snapshot)
+            transition = play_active_match_round(state, SystemRandomSource())
+            return EngineAdvanceResult(
+                transition=transition,
+                snapshot=tournament_state_to_snapshot(transition.state),
+            )
+        except EngineError as error:
+            raise EngineUnavailable("The official Game Engine could not advance the saved state.") from error
 
     def run_training_choice(self, command: TrainingChoiceCommand) -> TrainingChoiceResult:
         try:

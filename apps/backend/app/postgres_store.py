@@ -14,8 +14,10 @@ from uuid import UUID, uuid4
 
 from rps_game_engine import tournament_state_from_snapshot
 
+from .competitive_events import events_for_round
 from .engine_gateway import EnginePlayerSnapshot, EngineUnavailable, GameEngineGateway, StartTournamentCommand
 from .models import StrategyIntent
+from .public_state import official_state_view
 from .security import generate_access_token, generate_tournament_code
 from .store import (
     InvalidCredential,
@@ -180,6 +182,7 @@ class PostgresTournamentStore:
                 ready=member_status == "ready",
                 strategy_locked=locked_at is not None or tournament.started,
                 removed=member_status == "removed",
+                membership_status=member_status,
             )
         return players
 
@@ -261,6 +264,26 @@ class PostgresTournamentStore:
     def get_tournament(self, code: str) -> TournamentRecord:
         with self._connect() as connection, connection.cursor() as cursor:
             return self._tournament(cursor, code)
+
+    def official_state_snapshot_for(self, tournament: TournamentRecord) -> tuple[dict[str, object], int, int]:
+        """Load the latest durable Engine snapshot without exposing it directly."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT s.state_document, s.state_version, r.start_sequence
+                     FROM official_state_snapshots s JOIN tournaments t ON t.id=s.tournament_id
+                     JOIN tournament_runs r ON r.tournament_id=t.id AND r.id=t.current_run_id
+                    WHERE s.tournament_id = %s
+                 ORDER BY s.state_version DESC
+                    LIMIT 1""",
+                (tournament.id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise StoreError("Official tournament state is not available.")
+            snapshot = self._read_rules(row[0])
+            if not isinstance(snapshot, dict) or not isinstance(row[1], int):
+                raise RuntimeError("Persisted official state is invalid.")
+            return snapshot, row[1], row[2]
 
     def _capability(self, cursor, tournament_id: str, credential: str | None, role: str | None = None) -> tuple[str, str, str]:
         if not credential:
@@ -384,6 +407,12 @@ class PostgresTournamentStore:
             raise StoreError()
         self._training_sessions[(tournament.id, player.id)] = TrainingSessionRecord(training_id=training_id, state=state)
 
+    def clear_training_session(self, tournament: TournamentRecord, player: PlayerRecord) -> None:
+        """Discard ephemeral practice state; it is not authoritative tournament data."""
+        if tournament.started or player.removed:
+            raise StoreError()
+        self._training_sessions.pop((tournament.id, player.id), None)
+
     def update_configuration(
         self,
         tournament: TournamentRecord,
@@ -505,6 +534,7 @@ class PostgresTournamentStore:
                 raise StoreError("At least two confirmed participants are required.")
             command = StartTournamentCommand(
                 tournament_id=tournament.id, hearts_required=tournament.hearts_required,
+                run_id=str(uuid4()),
                 players=tuple(EnginePlayerSnapshot(player_id=player.id, strategy=dict(player.strategy or {})) for player in players),
             )
             result = engine.start_tournament(command)
@@ -513,7 +543,7 @@ class PostgresTournamentStore:
                 restored_state = tournament_state_from_snapshot(result.snapshot)
             except Exception as error:
                 raise EngineUnavailable("The Engine returned an invalid official snapshot.") from error
-            if restored_state.tournament_id != tournament.id:
+            if restored_state.tournament_id != tournament.id or restored_state.run_id != command.run_id:
                 raise EngineUnavailable("The Engine returned a state for another tournament.")
             cursor.execute("UPDATE player_strategies SET locked_at = CURRENT_TIMESTAMP WHERE tournament_id = %s AND member_id = ANY(%s::uuid[]) AND locked_at IS NULL RETURNING id, member_id, strategy_document, strategy_digest", (tournament.id, [player.id for player in players]))
             locked = {str(member_id): (str(strategy_id), document, digest) for strategy_id, member_id, document, digest in cursor.fetchall()}
@@ -530,6 +560,9 @@ class PostgresTournamentStore:
             state_digest = sha256(json.dumps(result.snapshot, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
             transition_id, event_id = str(uuid4()), str(uuid4())
             new_version, sequence = previous_version + 1, previous_sequence + 1
+            cursor.execute("INSERT INTO tournament_runs (id,tournament_id,number,start_sequence,state_document) VALUES (%s,%s,1,%s,%s::jsonb)",
+                (command.run_id,tournament.id,sequence,json.dumps(result.snapshot)))
+            cursor.execute("UPDATE tournaments SET current_run_id=%s WHERE id=%s", (command.run_id,tournament.id))
             cursor.execute("UPDATE tournaments SET status = 'running', state_version = %s, next_event_sequence = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (new_version, sequence, tournament.id))
             cursor.execute("INSERT INTO official_transitions (id, tournament_id, command_id, transition_key, expected_state_version, resulting_state_version, state_digest) VALUES (%s, %s, %s, %s, %s, %s, %s)", (transition_id, tournament.id, command_id, str(uuid4()), previous_version, new_version, state_digest))
             cursor.execute("INSERT INTO official_state_snapshots (id, tournament_id, transition_id, state_version, state_document, state_digest) VALUES (%s, %s, %s, %s, %s::jsonb, %s)", (str(uuid4()), tournament.id, transition_id, new_version, json.dumps(result.snapshot), state_digest))
@@ -539,13 +572,282 @@ class PostgresTournamentStore:
                     battle = match.get("battle", {}) if isinstance(match, dict) else {}
                     if not isinstance(battle, dict):
                         raise EngineUnavailable("The Engine returned an invalid match snapshot.")
-                    cursor.execute("""INSERT INTO official_matches (id, tournament_id, engine_match_id, bracket_round, bracket_position, player_one_snapshot_id, player_two_snapshot_id, status, match_state_document, state_digest)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)""", (str(uuid4()), tournament.id, match["match_id"], current_round["number"], position, snapshot_ids[battle["player_one_id"]], snapshot_ids[battle["player_two_id"]], match["status"], json.dumps(battle), sha256(json.dumps(battle, separators=(",", ":"), sort_keys=True).encode()).hexdigest()))
-            public_payload = {"tournamentId": tournament.id, "stateVersion": new_version, "event": "tournament_started"}
+                    cursor.execute("""INSERT INTO official_matches (id, tournament_id, run_id, engine_match_id, bracket_round, bracket_position, player_one_snapshot_id, player_two_snapshot_id, status, match_state_document, state_digest)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)""", (str(uuid4()), tournament.id, command.run_id, match["match_id"], current_round["number"], position, snapshot_ids[battle["player_one_id"]], snapshot_ids[battle["player_two_id"]], match["status"], json.dumps(battle), sha256(json.dumps(battle, separators=(",", ":"), sort_keys=True).encode()).hexdigest()))
+            public_payload = {"tournamentId": tournament.id, "runId": command.run_id, "stateVersion": new_version, "event": "tournament_started"}
             cursor.execute("INSERT INTO official_game_events (id, tournament_id, transition_id, sequence, event_type, public_payload) VALUES (%s, %s, %s, %s, 'tournament_started', %s::jsonb)", (event_id, tournament.id, transition_id, sequence, json.dumps(public_payload)))
             cursor.execute("INSERT INTO realtime_outbox (event_id, tournament_id) VALUES (%s, %s)", (event_id, tournament.id))
-            response = {"status": "started", "tournament_id": tournament.id, "state_reference": result.state_reference, "state_version": new_version}
+            response = {"status": "started", "tournament_id": tournament.id, "run_id": command.run_id, "state_reference": result.state_reference, "state_version": new_version}
             cursor.execute("UPDATE idempotency_commands SET status = 'completed', response = %s::jsonb, completed_at = CURRENT_TIMESTAMP WHERE id = %s AND tournament_id = %s", (json.dumps(response), command_id, tournament.id))
             for player in players:
                 self._training_sessions.pop((tournament.id, player.id), None)
             return response
+
+    def repeat_tournament_atomic(self, *, code: str, credential: str | None,
+            idempotency_key: str, expected_run_id: str, engine: GameEngineGateway) -> dict[str, object]:
+        """Create one independent run without deleting any prior competitive record."""
+        try:
+            key, expected = str(UUID(idempotency_key)), str(UUID(expected_run_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise InvalidIdempotencyKey() from error
+        fingerprint = sha256(f"repeat:{expected}".encode()).hexdigest()
+        with self._connect() as connection, connection.cursor() as cursor:
+            room = self._tournament(cursor, code, lock=True)
+            _, actor, _ = self._capability(cursor, room.id, credential, "organizer")
+            cursor.execute("SELECT request_fingerprint,response FROM idempotency_commands WHERE tournament_id=%s AND actor_subject_id=%s AND operation='repeat_tournament' AND idempotency_key=%s", (room.id,actor,key))
+            prior = cursor.fetchone()
+            if prior:
+                if prior[0] != fingerprint:
+                    raise IdempotencyConflict()
+                return prior[1]
+            cursor.execute("SELECT status,current_run_id,state_version,next_event_sequence FROM tournaments WHERE id=%s", (room.id,))
+            status, old_run, version, sequence = cursor.fetchone()
+            if status != 'completed' or str(old_run) != expected:
+                raise StoreError("Only the current completed execution can be repeated.")
+            cursor.execute("SELECT number,finished_at FROM tournament_runs WHERE tournament_id=%s AND id=%s", (room.id,old_run))
+            number, finished = cursor.fetchone()
+            if finished is None:
+                raise StoreError("The execution has not finished.")
+            cursor.execute("SELECT engine_player_id,strategy_document,id,strategy_digest FROM official_player_snapshots WHERE tournament_id=%s ORDER BY member_id", (room.id,))
+            frozen = cursor.fetchall()
+            for _, strategy, _, digest in frozen:
+                if sha256(json.dumps(strategy,separators=(",",":"),sort_keys=True).encode()).hexdigest() != digest:
+                    raise EngineUnavailable("Frozen strategy digest mismatch.")
+            # Fresh server-side Fisher-Yates draw; no client bracket input.
+            from secrets import SystemRandom
+            SystemRandom().shuffle(frozen)
+            run_id, command_id, transition_id, event_id = (str(uuid4()) for _ in range(4))
+            command = StartTournamentCommand(room.id,room.hearts_required,
+                tuple(EnginePlayerSnapshot(player_id,dict(strategy)) for player_id,strategy,_,_ in frozen),run_id)
+            result = engine.start_tournament(command)
+            restored = tournament_state_from_snapshot(result.snapshot)
+            if (restored.tournament_id != room.id or restored.run_id != run_id
+                    or restored.hearts_per_match != room.hearts_required
+                    or restored.status.value != "active" or restored.completed_rounds
+                    or {c["player_id"]:c["strategy"] for c in result.snapshot["competitors"]}
+                       != {p[0]:p[1] for p in frozen}):
+                raise EngineUnavailable("Invalid new execution.")
+            digest = sha256(json.dumps(result.snapshot,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+            response = {"status":"started","tournament_id":room.id,"run_id":run_id,"run_number":number+1,"state_version":version+1}
+            cursor.execute("""INSERT INTO idempotency_commands (id,tournament_id,actor_subject_id,operation,idempotency_key,request_fingerprint,status,response,completed_at)
+                VALUES (%s,%s,%s,'repeat_tournament',%s,%s,'completed',%s::jsonb,CURRENT_TIMESTAMP)""",
+                (command_id,room.id,actor,key,fingerprint,json.dumps(response)))
+            cursor.execute("INSERT INTO tournament_runs (id,tournament_id,number,start_sequence,state_document) VALUES (%s,%s,%s,%s,%s::jsonb)",
+                (run_id,room.id,number+1,sequence+1,json.dumps(result.snapshot)))
+            cursor.execute("""UPDATE tournaments SET current_run_id=%s,status='running',state_version=%s,next_event_sequence=%s,
+                updated_at=CURRENT_TIMESTAMP,next_transition_at=CURRENT_TIMESTAMP WHERE id=%s""",(run_id,version+1,sequence+1,room.id))
+            cursor.execute("""INSERT INTO official_transitions (id,tournament_id,command_id,transition_key,expected_state_version,resulting_state_version,state_digest)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)""",(transition_id,room.id,command_id,str(uuid4()),version,version+1,digest))
+            cursor.execute("""INSERT INTO official_state_snapshots (id,tournament_id,transition_id,state_version,state_document,state_digest)
+                VALUES (%s,%s,%s,%s,%s::jsonb,%s)""",(str(uuid4()),room.id,transition_id,version+1,json.dumps(result.snapshot),digest))
+            cursor.execute("DELETE FROM official_state_snapshots WHERE tournament_id=%s AND state_version<%s",(room.id,version+1))
+            snapshot_ids = {p[0]:str(p[2]) for p in frozen}
+            for position, match in enumerate(result.snapshot["current_round"]["matches"],1):
+                battle = match["battle"]
+                battle_digest = sha256(json.dumps(battle,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+                cursor.execute("""INSERT INTO official_matches (id,tournament_id,run_id,engine_match_id,bracket_round,bracket_position,
+                    player_one_snapshot_id,player_two_snapshot_id,status,match_state_document,state_digest)
+                    VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s,%s::jsonb,%s)""",
+                    (str(uuid4()),room.id,run_id,match["match_id"],position,snapshot_ids[battle["player_one_id"]],snapshot_ids[battle["player_two_id"]],match["status"],json.dumps(battle),battle_digest))
+            payload = {"tournamentId":room.id,"runId":run_id,"runNumber":number+1,"stateVersion":version+1,
+                "state":official_state_view(room,result.snapshot,state_version=version+1)}
+            cursor.execute("INSERT INTO official_game_events (id,tournament_id,transition_id,sequence,event_type,public_payload) VALUES (%s,%s,%s,%s,'tournament_started',%s::jsonb)",
+                (event_id,room.id,transition_id,sequence+1,json.dumps(payload)))
+            cursor.execute("INSERT INTO realtime_outbox (event_id,tournament_id) VALUES (%s,%s)",(event_id,room.id))
+            return response
+
+    def advance_one_running_tournament(self, engine: GameEngineGateway) -> bool:
+        """Commit one Engine round and its event ledger under a room row lock.
+
+        Multiple backend workers may call this concurrently. PostgreSQL picks
+        at most one worker per tournament; the version/round uniqueness checks
+        provide an additional guard. A crashed worker leaves no partial round.
+        """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id, access_code, state_version, next_event_sequence, current_run_id
+                     FROM tournaments
+                    WHERE status = 'running'
+                      AND next_transition_at <= CURRENT_TIMESTAMP
+                      AND updated_at <= CURRENT_TIMESTAMP - INTERVAL '1 second'
+                 ORDER BY next_transition_at, id
+                    LIMIT 1 FOR UPDATE SKIP LOCKED"""
+            )
+            candidate = cursor.fetchone()
+            if candidate is None:
+                return False
+            tournament_id, code, previous_version, previous_sequence, current_run_id = candidate
+            tournament_id = str(tournament_id)
+            cursor.execute(
+                """SELECT state_document, state_version
+                     FROM official_state_snapshots
+                    WHERE tournament_id = %s
+                 ORDER BY state_version DESC LIMIT 1""",
+                (tournament_id,),
+            )
+            saved = cursor.fetchone()
+            if saved is None or saved[1] != previous_version:
+                raise RuntimeError("Running tournament has no matching official snapshot.")
+            previous_snapshot = self._read_rules(saved[0])
+            previous = tournament_state_from_snapshot(previous_snapshot)
+            if (previous.tournament_id != tournament_id or previous.status.value != "active"
+                    or (previous.run_id or tournament_id) != str(current_run_id)):
+                raise RuntimeError("Running tournament state does not match the database root.")
+
+            # The immutable player snapshots are the private strategy source.
+            # Verify the Engine document still agrees with those locked rows.
+            cursor.execute(
+                """SELECT engine_player_id, strategy_document, strategy_digest
+                     FROM official_player_snapshots WHERE tournament_id = %s""",
+                (tournament_id,),
+            )
+            frozen = {
+                player_id: (self._read_rules(document), digest)
+                for player_id, document, digest in cursor.fetchall()
+            }
+            if len(frozen) != len(previous.competitors):
+                raise RuntimeError("Official player snapshot count is inconsistent.")
+            for competitor in previous_snapshot["competitors"]:
+                player_id = competitor["player_id"]
+                strategy = competitor["strategy"]
+                saved_strategy = frozen.get(player_id)
+                digest = sha256(json.dumps(strategy, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+                if saved_strategy is None or saved_strategy[0] != strategy or saved_strategy[1] != digest:
+                    raise RuntimeError("Official strategy snapshot is inconsistent.")
+
+            result = engine.advance_tournament(previous_snapshot)
+            next_state = tournament_state_from_snapshot(result.snapshot)
+            if (next_state != result.transition.state or next_state.tournament_id != tournament_id
+                    or (next_state.run_id or tournament_id) != str(current_run_id)):
+                raise EngineUnavailable("The Engine returned an inconsistent round snapshot.")
+            new_version = previous_version + 1
+            cursor.execute("""UPDATE tournament_runs SET state_document=%s::jsonb,
+                first_place=%s,second_place=%s,third_place=%s,
+                finished_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END
+                WHERE tournament_id=%s AND id=%s AND finished_at IS NULL""",
+                (json.dumps(result.snapshot), next_state.first_place,next_state.second_place,next_state.third_place,
+                 next_state.champion_id is not None,tournament_id,current_run_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError("Current execution is not active.")
+            tournament = self._tournament(cursor, code)
+            public_state = official_state_view(tournament, result.snapshot, state_version=new_version)
+            events = events_for_round(
+                previous, result.transition, state_version=new_version, public_state=public_state
+            )
+            if not events:
+                raise RuntimeError("An official round must produce at least one public event.")
+            state_digest = sha256(json.dumps(result.snapshot, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+            transition_id = str(uuid4())
+            status = "completed" if next_state.status.value == "completed" else "running"
+            # A long sequence of unavoidable ties remains valid, but it must
+            # not consume disk/CPU at one round per second indefinitely.
+            tie_streak = 0
+            if result.transition.match_round.lost_heart_player_id is None:
+                active = next(match for match in previous.current_round.matches if match.status.value == "active")
+                for round_ in reversed((*active.battle.rounds, result.transition.match_round)):
+                    if round_.lost_heart_player_id is not None:
+                        break
+                    tie_streak += 1
+            delay_seconds = min(3600, 2 ** min(max(tie_streak - 8, 0), 12))
+            cursor.execute(
+                """UPDATE tournaments
+                      SET status = %s, state_version = %s, next_event_sequence = %s,
+                          updated_at = CURRENT_TIMESTAMP,
+                          next_transition_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second')
+                    WHERE id = %s AND state_version = %s""",
+                (status, new_version, previous_sequence + len(events), delay_seconds,
+                 tournament_id, previous_version),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Tournament version changed during its locked transition.")
+            cursor.execute(
+                """INSERT INTO official_transitions
+                   (id, tournament_id, transition_key, expected_state_version,
+                    resulting_state_version, state_digest)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (transition_id, tournament_id, str(uuid4()), previous_version, new_version, state_digest),
+            )
+            cursor.execute(
+                """INSERT INTO official_state_snapshots
+                   (id, tournament_id, transition_id, state_version, state_document, state_digest)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s)""",
+                (str(uuid4()), tournament_id, transition_id, new_version, json.dumps(result.snapshot), state_digest),
+            )
+            # The transition digest and normalized match-round ledger retain
+            # history. Only the newest reconstructible full snapshot is needed
+            # for recovery; retaining every cumulative document is quadratic.
+            cursor.execute(
+                "DELETE FROM official_state_snapshots WHERE tournament_id = %s AND state_version < %s",
+                (tournament_id, new_version),
+            )
+
+            cursor.execute(
+                """SELECT engine_player_id, id FROM official_player_snapshots
+                    WHERE tournament_id = %s""", (tournament_id,),
+            )
+            player_snapshot_ids = {player_id: str(snapshot_id) for player_id, snapshot_id in cursor.fetchall()}
+            all_rounds = [*result.snapshot["completed_rounds"]]
+            if result.snapshot["current_round"] is not None:
+                all_rounds.append(result.snapshot["current_round"])
+            active_match_id = None
+            if previous.current_round is not None:
+                active_match_id = next(
+                    match.match_id for match in previous.current_round.matches
+                    if match.status.value == "active"
+                )
+            persisted_match_id = None
+            persisted_round = None
+            for bracket_round in all_rounds:
+                for position, match in enumerate(bracket_round["matches"], start=1):
+                    battle = match["battle"]
+                    battle_digest = sha256(json.dumps(battle, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+                    cursor.execute(
+                        """INSERT INTO official_matches
+                           (id, tournament_id, run_id, engine_match_id, bracket_round, bracket_position,
+                            player_one_snapshot_id, player_two_snapshot_id, status,
+                            match_state_document, state_digest, completed_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                                   CASE WHEN %s = 'completed' THEN CURRENT_TIMESTAMP ELSE NULL END)
+                           ON CONFLICT (tournament_id, engine_match_id) DO UPDATE
+                             SET status = EXCLUDED.status,
+                                 match_state_document = EXCLUDED.match_state_document,
+                                 state_digest = EXCLUDED.state_digest,
+                                 updated_at = CURRENT_TIMESTAMP,
+                                 completed_at = CASE WHEN EXCLUDED.status = 'completed'
+                                     THEN COALESCE(official_matches.completed_at, CURRENT_TIMESTAMP)
+                                     ELSE NULL END
+                           RETURNING id""",
+                        (str(uuid4()), tournament_id, current_run_id, match["match_id"], bracket_round["number"], position,
+                         player_snapshot_ids[battle["player_one_id"]],
+                         player_snapshot_ids[battle["player_two_id"]], match["status"],
+                         json.dumps(battle), battle_digest, match["status"]),
+                    )
+                    match_row_id = str(cursor.fetchone()[0])
+                    if match["match_id"] == active_match_id:
+                        persisted_match_id = match_row_id
+                        persisted_round = battle["rounds"][-1]
+            if persisted_match_id is None or persisted_round is None:
+                raise RuntimeError("Engine round did not remain in the persisted bracket.")
+            round_digest = sha256(json.dumps(persisted_round, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+            cursor.execute(
+                """INSERT INTO official_match_rounds
+                   (id, tournament_id, match_id, round_number, state_version,
+                    round_document, round_digest)
+                   VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)""",
+                (str(uuid4()), tournament_id, persisted_match_id, persisted_round["number"],
+                 new_version, json.dumps(persisted_round), round_digest),
+            )
+            for offset, (event_type, payload) in enumerate(events, start=1):
+                event_id = str(uuid4())
+                cursor.execute(
+                    """INSERT INTO official_game_events
+                       (id, tournament_id, transition_id, sequence, event_type, public_payload)
+                       VALUES (%s, %s, %s, %s, %s, %s::jsonb)""",
+                    (event_id, tournament_id, transition_id, previous_sequence + offset,
+                     event_type, json.dumps(payload)),
+                )
+                cursor.execute(
+                    "INSERT INTO realtime_outbox (event_id, tournament_id) VALUES (%s, %s)",
+                    (event_id, tournament_id),
+                )
+            return True

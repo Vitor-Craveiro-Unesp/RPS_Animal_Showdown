@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from .protocol import OfficialEvent, ProtocolError, authorize_subscription, validate_client_frame
+from .protocol import REPLAY_PAGE_SIZE, OfficialEvent, ProtocolError, authorize_subscription, validate_client_frame
 from .tickets import TicketVerifier
+
+MAX_REPLAY_EVENTS_PER_CONNECTION = 1_000
+MAX_RESUME_REQUESTS_PER_CONNECTION = 3
+logger = logging.getLogger(__name__)
+
+
+class ReplayBudgetExceeded(Exception):
+    """A client must reconnect with its advanced cursor to continue replay."""
 
 
 class EventStream(Protocol):
@@ -34,7 +43,15 @@ class InMemoryEventStream:
         if any(stored.event_id == event.event_id for stored in events):
             return
         events.append(event)
+        await self.fanout(event)
+
+    async def fanout(self, event: OfficialEvent) -> None:
+        """Deliver live only; PostgreSQL owns production replay history."""
         for subscriber in self._subscribers.get(event.tournament_id, set()).copy():
+            if subscriber.full():
+                # Drop the oldest live frame for a stalled receiver. The
+                # sequence gap triggers durable replay when it catches up.
+                subscriber.get_nowait()
             subscriber.put_nowait(event)
 
     async def publish(self, event: OfficialEvent) -> None:
@@ -42,10 +59,10 @@ class InMemoryEventStream:
         await self.append(event)
 
     async def events_after(self, tournament_id: str, sequence: int) -> tuple[OfficialEvent, ...]:
-        return tuple(event for event in self._events.get(tournament_id, []) if event.sequence > sequence)
+        return tuple(event for event in self._events.get(tournament_id, []) if event.sequence > sequence)[:REPLAY_PAGE_SIZE]
 
     async def subscribe(self, tournament_id: str) -> asyncio.Queue[OfficialEvent]:
-        queue: asyncio.Queue[OfficialEvent] = asyncio.Queue()
+        queue: asyncio.Queue[OfficialEvent] = asyncio.Queue(maxsize=256)
         self._subscribers.setdefault(tournament_id, set()).add(queue)
         return queue
 
@@ -77,7 +94,7 @@ class DatabaseBackedEventStream:
         await self.live_fanout.unsubscribe(tournament_id, queue)
 
     async def publish(self, event: OfficialEvent) -> None:
-        await self.live_fanout.publish(event)
+        await self.live_fanout.fanout(event)
 
 
 @dataclass(frozen=True)
@@ -106,32 +123,64 @@ def create_realtime_endpoint(
         tournament_id: str | None = None
         receive_task: asyncio.Task | None = None
         event_task: asyncio.Task | None = None
+        replayed_total = 0
+        async def replay_after(after_sequence: int) -> int:
+            nonlocal replayed_total
+            cursor = after_sequence
+            while True:
+                await asyncio.to_thread(verifier.verify_active, ticket)
+                batch = await stream.events_after(tournament_id, cursor)
+                if not batch:
+                    return cursor
+                if batch[0].sequence > cursor + 1:
+                    # Explicit baseline when older runs are outside current replay.
+                    cursor = batch[0].sequence - 1
+                    await websocket.send_json({"type": "replay-reset", "afterSequence": cursor})
+                for event in batch:
+                    if replayed_total >= MAX_REPLAY_EVENTS_PER_CONNECTION:
+                        raise ReplayBudgetExceeded()
+                    await websocket.send_json(event.to_wire())
+                    replayed_total += 1
+                    cursor = max(cursor, event.sequence)
+                if len(batch) < REPLAY_PAGE_SIZE:
+                    return cursor
+
         try:
             await websocket.accept()
             authenticate = validate_client_frame(
                 await asyncio.wait_for(websocket.receive_json(), timeout=authentication_timeout_seconds)
             )
-            claims = verifier.verify_active(str(authenticate["ticket"]))
+            ticket = str(authenticate["ticket"])
+            claims = await asyncio.to_thread(verifier.verify_active, ticket)
             channel = authorize_subscription(claims.grant, str(authenticate["channel"]))
             tournament_id = claims.tournament_id
             subscription = await stream.subscribe(tournament_id)
             await websocket.send_json({"type": "subscribed", "channel": channel})
+            logger.info("realtime subscription accepted tournament_id=%s", tournament_id)
 
             resume = validate_client_frame(
                 await asyncio.wait_for(websocket.receive_json(), timeout=authentication_timeout_seconds)
             )
             if resume["type"] != "resume":
                 raise ProtocolError("resume is required after authentication")
+            resume_requests = 1
             after_sequence = int(resume["afterSequence"])
-            last_sent_sequence = after_sequence
-            for event in await stream.events_after(tournament_id, after_sequence):
-                await websocket.send_json(event.to_wire())
-                last_sent_sequence = max(last_sent_sequence, event.sequence)
+            last_sent_sequence = await replay_after(after_sequence)
 
             receive_task = asyncio.create_task(websocket.receive_json())
             event_task = asyncio.create_task(subscription.get())
+            clock = asyncio.get_running_loop()
+            recheck_at = clock.time() + 5
             while True:
-                done, _ = await asyncio.wait({receive_task, event_task}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    {receive_task, event_task}, timeout=max(0, recheck_at - clock.time()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if clock.time() >= recheck_at:
+                    await asyncio.to_thread(verifier.verify_active, ticket)
+                    recheck_at = clock.time() + 5
+                if not done:
+                    continue
                 if event_task in done:
                     event = event_task.result()
                     # The subscription starts before durable replay to avoid a
@@ -146,13 +195,28 @@ def create_realtime_endpoint(
                     frame = validate_client_frame(receive_task.result())
                     if frame["type"] != "resume":
                         raise ProtocolError("client publishing is not supported")
+                    resume_requests += 1
+                    if resume_requests > MAX_RESUME_REQUESTS_PER_CONNECTION:
+                        raise ProtocolError("too many replay requests")
                     resume_after = int(frame["afterSequence"])
-                    for event in await stream.events_after(tournament_id, resume_after):
-                        await websocket.send_json(event.to_wire())
-                        last_sent_sequence = max(last_sent_sequence, event.sequence)
+                    last_sent_sequence = max(last_sent_sequence, await replay_after(resume_after))
                     receive_task = asyncio.create_task(websocket.receive_json())
-        except (asyncio.TimeoutError, ProtocolError, ValueError, WebSocketDisconnect):
-            await websocket.close(code=1008)
+        except WebSocketDisconnect:
+            # A browser reload closes an otherwise healthy connection. There
+            # is no peer left to receive another close frame.
+            if tournament_id is not None:
+                logger.info("realtime connection disconnected tournament_id=%s", tournament_id)
+            pass
+        except ReplayBudgetExceeded:
+            try:
+                await websocket.close(code=1013)
+            except WebSocketDisconnect:
+                pass
+        except (asyncio.TimeoutError, ProtocolError, ValueError):
+            try:
+                await websocket.close(code=1008)
+            except WebSocketDisconnect:
+                pass
         except asyncio.CancelledError:
             # TestClient and ASGI servers cancel the handler after a peer
             # disconnects.  The ``finally`` block below still owns cleanup;

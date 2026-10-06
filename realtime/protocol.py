@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import UUID
 
+REPLAY_PAGE_SIZE = 250
+
 
 class ProtocolError(ValueError):
     """A realtime frame, channel or event violates the contract."""

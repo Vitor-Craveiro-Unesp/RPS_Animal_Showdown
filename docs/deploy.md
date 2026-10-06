@@ -1,5 +1,8 @@
 # Development and deployment baseline
 
+For the Round 8.1 production handoff, environment matrix, Render blueprint and
+the safe deployment order, see [production readiness](deployment/production-readiness.md).
+
 ## Local development
 
 1. Copy `.env.example` to `.env` and use only local values.
@@ -30,9 +33,9 @@ $env:RPS_TEST_DATABASE_URL = "postgresql://rps_test:local-development-only@local
 .\scripts\test-postgres.ps1
 ```
 
-The Compose PostgreSQL service intentionally has no host port, so do not reuse
-its development database for this host-run test. Run the test against a separate
-local PostgreSQL 16 instance or a disposable CI database instead. If Docker is
+The Compose PostgreSQL service binds only `127.0.0.1:55432`. Do not reuse its
+development database for this host-run test: run it against a separate local
+PostgreSQL 16 database or a disposable CI database instead. If Docker is
 unavailable, that same existing local instance or CI database is the supported
 path; this does not change the application architecture or bypass the
 PostgreSQL checks.

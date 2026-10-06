@@ -7,10 +7,15 @@ services:
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      APP_ENV: development
+      # Server-side Next rewrites run inside this container, where localhost
+      # is not the API container.
+      API_INTERNAL_BASE_URL: http://backend:8000
+      NEXT_PUBLIC_REALTIME_URL: ${NEXT_PUBLIC_REALTIME_URL:-ws://localhost:8000/v1/realtime}
     volumes:
       - ./apps/frontend:/app/apps/frontend
       - frontend_node_modules:/app/apps/frontend/node_modules
+      - frontend_next:/app/apps/frontend/.next
     depends_on:
       backend:
         condition: service_started
@@ -23,6 +28,7 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
+      APP_ENV: development
       DATABASE_URL: ${DATABASE_URL}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
       # The durable PostgreSQL/realtime path must fail closed without its
@@ -37,6 +43,8 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rps_animal_showdown}
       POSTGRES_USER: ${POSTGRES_USER:-rps_app}
@@ -51,4 +59,5 @@ services:
 
 volumes:
   frontend_node_modules:
+  frontend_next:
   postgres_data:

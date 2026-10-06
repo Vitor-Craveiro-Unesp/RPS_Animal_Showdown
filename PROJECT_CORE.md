@@ -38,7 +38,7 @@ Cada participante:
 3. escolhe um personagem animal;
 4. configura a estratégia probabilística do personagem;
 5. aguarda o organizador;
-6. pode utilizar o modo Treino;
+6. pode utilizar o Treinar livre pela Home e o Animal Rush enquanto aguarda o torneio;
 7. acompanha o campeonato em tempo real.
 
 Depois que o organizador inicia, as batalhas acontecem automaticamente.
@@ -57,7 +57,8 @@ Pode:
 - informar nome;
 - escolher personagem;
 - configurar estratégia;
-- usar o modo Treino;
+- usar o Treinar livre fora do torneio;
+- jogar Animal Rush enquanto aguarda o início após confirmar READY;
 - acompanhar o torneio.
 
 ## Organizador
@@ -181,13 +182,13 @@ o sistema deverá:
 
 # 9. Número ímpar de jogadores
 
-Quando houver número ímpar de participantes, um jogador poderá avançar automaticamente.
+Quando um novo torneio iniciar com quantidade ímpar, o servidor sorteia um participante para aguardar os confrontos iniciais. Após todos esses confrontos, sorteia exatamente um dos perdedores para a **Segunda Chance** contra quem aguardou.
 
-Esse avanço é um BYE.
+O selecionado mantém ID, animal e estratégia congelada; o indicador visual é o animal original + 🧟 durante o restante do torneio. A derrota original permanece no histórico. Ambos iniciam a partida especial com os corações completos do formato (MD1/3/5/7: 1/2/3/4), usando o mesmo motor RPS. Somente o vencedor segue com os vencedores iniciais.
 
-O sistema decide aleatoriamente quem recebe o BYE.
+A Segunda Chance ocorre apenas uma vez, na primeira fase de torneios inicialmente ímpares. Fases posteriores ímpares usam BYE aleatório válido apenas naquela fase. Torneios pares não recebem Segunda Chance. O organizador não escolhe nenhum sorteado.
 
-O organizador não escolhe manualmente.
+Snapshots legados v1 de torneios já iniciados com BYE inicial preservam sua regra anterior até o término. Novos torneios usam v2. Ver [relatório da Rodada 6.6](docs/round-6-6-report.md).
 
 ---
 
@@ -630,70 +631,54 @@ ou desligada e efeitos ligados ou desligados.
 
 ---
 
-# 32. Modo Treino
+# 32. Treinar livre e Sala de Espera
 
-Quando o participante terminar sua configuração e estiver aguardando os demais, poderá acessar:
+O botão **Treinar** da Home é um modo livre de RPS, sem código de torneio. Nele, a pessoa escolhe animal, treinador, quantidade de corações e estratégia antes de praticar.
 
-**TREINO**
-
-Nesse modo:
-
-- o participante enfrenta seu próprio personagem;
-- a pessoa escolhe manualmente;
-- o personagem utiliza a estratégia configurada.
-
-Botões:
-
-- Pedra;
-- Papel;
-- Tesoura.
+Após entrar em um torneio, configurar a estratégia e confirmar READY, o participante entra em uma Sala de Espera clara, que confirma a inscrição e mantém a conexão realtime até o Start oficial.
 
 ---
 
-# 33. Regras do Treino
+# 33. Animal Rush
 
-O Treino deve usar exatamente as mesmas regras do torneio atual.
+Na Sala de Espera, o participante pode abrir o **Animal Rush**, um minigame local de reconhecimento rápido das regras de Pedra, Papel e Tesoura.
 
-Exemplos:
+O sistema apresenta Pedra, Papel ou Tesoura e a pessoa escolhe o símbolo que vence o exibido. O minigame mantém pontuação, sequência atual e melhor sequência da sessão. O tempo de resposta diminui progressivamente, de forma previsível e com limite mínimo jogável.
 
-Se o torneio possui 2 corações:
-
-o Treino possui 2.
-
-Se possui 3:
-
-o Treino possui 3.
-
-Também respeitar:
-
-- estratégia condicional;
-- empates;
-- perda de coração;
-- condição de vitória.
+O animal do participante aparece apenas como identidade visual e não oferece bônus ou vantagem.
 
 ---
 
-# 34. Isolamento do Treino
+# 34. Isolamento do Animal Rush
 
-Treino NÃO altera:
+O Animal Rush não usa o Game Engine competitivo e NÃO altera:
 
+- estratégia oficial;
+- corações oficiais;
 - classificação;
 - chaveamento;
-- vidas oficiais;
-- resultados;
-- seed;
-- estado competitivo.
+- partidas;
+- BYE;
+- eventos competitivos;
+- vencedor;
+- campeão;
+- snapshot oficial.
 
-É apenas uma simulação.
+Pontuação e sequência existem somente no estado transitório do minigame.
 
 ---
 
-# 35. Encerramento do Treino
+# 35. Prioridade do Start oficial
 
-Quando o organizador iniciar o torneio:
+O canal realtime continua ativo na Sala de Espera, durante o Animal Rush e na tela de resultado.
 
-- o Treino termina automaticamente;
-- o jogador é levado de volta à experiência oficial.
+Quando o evento `tournament_started` chegar:
+
+- timers do Animal Rush são cancelados;
+- o estado transitório do minigame é descartado;
+- a interface informa brevemente que o torneio começou;
+- o participante é levado imediatamente para a Arena oficial;
+- replay, reconnect e snapshot oficial continuam tendo prioridade.
 
 ---
 
@@ -1264,3 +1249,21 @@ Se uma implementação entrar em conflito com este documento:
 4. atualizar conscientemente a implementação ou o documento.
 
 Nenhum agente deve modificar regras centrais silenciosamente.
+## Adendo aprovado pelo proprietário — pódio e execuções independentes (2026-10-05)
+
+- A Segunda Chance permanece exclusiva da entrada inicial ímpar: uma única
+  seleção entre perdedores da primeira rodada, contra o participante aguardando.
+  Fases ímpares posteriores usam BYE normal, nunca nova ressurreição.
+- Duas semifinais reais geram bronze entre seus perdedores antes da Grande Final.
+  Bronze utiliza o mesmo Engine, estratégias e corações completos, sem alterar
+  os finalistas. A final define ouro/prata; bronze define terceiro.
+- Dois participantes não têm terceiro. Com três, o único participante que não
+  chega à final é terceiro. Quando uma fase de três gera uma semifinal e BYE,
+  o perdedor dessa única semifinal é terceiro, sem confronto artificial.
+- O organizador pode repetir somente uma execução completamente encerrada.
+  Cada repetição cria um tournament_run independente e inicia a competição:
+  preserva inscrições, identidades, estratégias congeladas e configurações;
+  sorteia novamente o bracket e reinicia todo estado competitivo.
+- Resultados, timestamps, snapshots finais e eventos anteriores permanecem no
+  banco. O servidor define todo o pódio; o navegador somente apresenta.
+- Contratos de implementação: [pódio e repetição](docs/podium-and-runs.md).

@@ -31,6 +31,7 @@ class PlayerRecord:
     ready: bool = False
     strategy_locked: bool = False
     removed: bool = False
+    membership_status: str = "joined"
 
 
 @dataclass
@@ -193,11 +194,13 @@ class InMemoryTournamentStore:
         if tournament.started or player.strategy_locked:
             raise StoreError()
         player.strategy = strategy.model_dump(mode="json")
+        player.membership_status = "configuring_strategy"
 
     def mark_ready(self, tournament: TournamentRecord, player: PlayerRecord) -> None:
         if tournament.started or player.strategy_locked or player.strategy is None:
             raise StoreError()
         player.ready = True
+        player.membership_status = "ready"
 
     def update_configuration(
         self,
@@ -233,6 +236,7 @@ class InMemoryTournamentStore:
         if player is None or player.removed:
             raise TournamentUnavailable()
         player.removed = True
+        player.membership_status = "removed"
 
     def ready_players_snapshot(self, tournament: TournamentRecord) -> tuple[PlayerRecord, ...]:
         return tuple(
@@ -285,6 +289,12 @@ class InMemoryTournamentStore:
         if tournament.started or player.removed:
             raise StoreError()
         tournament.training_sessions[player.id] = TrainingSessionRecord(training_id=training_id, state=state)
+
+    def clear_training_session(self, tournament: TournamentRecord, player: PlayerRecord) -> None:
+        """Discard one private practice session without mutating tournament state."""
+        if tournament.started or player.removed:
+            raise StoreError()
+        tournament.training_sessions.pop(player.id, None)
 
     def revoke_organizer_access(self, tournament: TournamentRecord) -> None:
         tournament.organizer_token_revoked = True

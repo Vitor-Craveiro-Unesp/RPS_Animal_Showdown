@@ -10,7 +10,7 @@ import asyncio
 from typing import Protocol
 
 from .dsn import to_psycopg_dsn
-from .protocol import OfficialEvent
+from .protocol import REPLAY_PAGE_SIZE, OfficialEvent
 from .tickets import TicketClaims
 
 
@@ -67,10 +67,14 @@ class PostgresRealtimeStore:
                 """
                 SELECT id, tournament_id, sequence, event_type, public_payload
                   FROM official_game_events
-                 WHERE tournament_id = %s AND sequence > %s
+                   WHERE tournament_id = %s AND sequence > %s
+                     AND sequence >= COALESCE((SELECT r.start_sequence FROM tournament_runs r
+                         JOIN tournaments t ON t.id=r.tournament_id AND t.current_run_id=r.id
+                         WHERE t.id=official_game_events.tournament_id), 1)
                  ORDER BY sequence ASC
+                 LIMIT %s
                 """,
-                (tournament_id, sequence),
+                (tournament_id, sequence, REPLAY_PAGE_SIZE),
             )
             return tuple(
                 OfficialEvent(str(event_id), str(room_id), event_sequence, event_type, payload)
@@ -108,13 +112,26 @@ class PostgresOutboxWorker:
             cursor.execute(
                 """
                 WITH candidate AS (
-                    SELECT event_id
-                      FROM realtime_outbox
-                     WHERE published_at IS NULL
-                       AND available_at <= CURRENT_TIMESTAMP
-                       AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
-                     ORDER BY available_at, event_id
-                     FOR UPDATE SKIP LOCKED
+                    SELECT outbox.event_id
+                      FROM realtime_outbox outbox
+                      JOIN official_game_events event
+                        ON event.id = outbox.event_id
+                       AND event.tournament_id = outbox.tournament_id
+                     WHERE outbox.published_at IS NULL
+                       AND outbox.available_at <= CURRENT_TIMESTAMP
+                       AND (outbox.lease_expires_at IS NULL OR outbox.lease_expires_at < CURRENT_TIMESTAMP)
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM official_game_events earlier
+                             JOIN realtime_outbox earlier_outbox
+                               ON earlier_outbox.event_id = earlier.id
+                              AND earlier_outbox.tournament_id = earlier.tournament_id
+                            WHERE earlier.tournament_id = event.tournament_id
+                              AND earlier.sequence < event.sequence
+                              AND earlier_outbox.published_at IS NULL
+                       )
+                     ORDER BY outbox.available_at, event.tournament_id, event.sequence
+                     FOR UPDATE OF outbox SKIP LOCKED
                      LIMIT 1
                 )
                 UPDATE realtime_outbox outbox

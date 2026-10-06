@@ -219,6 +219,8 @@ class BracketRoundState:
     entrant_ids: tuple[str, ...]
     bye_player_id: str | None
     matches: tuple[BracketMatch, ...]
+    waiting_player_id: str | None = None
+    second_chance_player_id: str | None = None
 
 
 class TournamentStatus(StrEnum):
@@ -235,6 +237,32 @@ class TournamentState:
     completed_rounds: tuple[BracketRoundState, ...] = ()
     status: TournamentStatus = TournamentStatus.ACTIVE
     champion_id: str | None = None
+    run_id: str | None = None
+    podium_enabled: bool = False
+
+    @property
+    def first_place(self) -> str | None:
+        return self.champion_id
+
+    @property
+    def second_place(self) -> str | None:
+        return self.completed_rounds[-1].matches[-1].battle.loser_id if self.champion_id else None
+
+    @property
+    def third_place(self) -> str | None:
+        if not self.podium_enabled:
+            return None
+        rounds = (*self.completed_rounds, *((self.current_round,) if self.current_round else ()))
+        bronze = next((m for r in rounds for m in r.matches if m.match_id.endswith(':third-place')), None)
+        if bronze:
+            return bronze.battle.winner_id
+        if not self.champion_id or len(self.competitors) == 2:
+            return None
+        if len(self.competitors) == 3:
+            return next(p.player_id for p in self.competitors if p.player_id not in (self.first_place, self.second_place))
+        # A three-entrant semifinal phase has one actual loser and one BYE.
+        previous = self.completed_rounds[-2]
+        return previous.matches[0].battle.loser_id if len(previous.entrant_ids) == 3 else None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,66 @@
+name: rps-status-demo
+
+# Pilha local isolada para demonstrar estados no painel do organizador.
+# Não compartilha portas, banco, volumes ou chave de realtime com docker-compose.yml.
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+    command: npm run dev
+    ports:
+      - "3100:3000"
+    environment:
+      APP_ENV: development
+      API_INTERNAL_BASE_URL: http://backend:8000
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8100
+      NEXT_PUBLIC_REALTIME_URL: ws://127.0.0.1:8100/v1/realtime
+    volumes:
+      - ./apps/frontend:/app/apps/frontend
+      - status_demo_frontend_node_modules:/app/apps/frontend/node_modules
+      - status_demo_frontend_next:/app/apps/frontend/.next
+    depends_on:
+      backend:
+        condition: service_started
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8100:8000"
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://rps_status_demo:local-status-demo-only@postgres:5432/rps_status_demo
+      ALLOWED_ORIGINS: http://127.0.0.1:3100,http://localhost:3100
+      # Valor fictício, exclusivo desta demonstração local; nunca usar em produção.
+      REALTIME_TICKET_SIGNING_KEY: status-demo-local-only-not-for-production
+    volumes:
+      - ./apps/backend:/app/apps/backend
+      - ./packages/game-engine:/app/packages/game-engine
+      - ./database:/app/database:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:55433:5432"
+    environment:
+      POSTGRES_DB: rps_status_demo
+      POSTGRES_USER: rps_status_demo
+      POSTGRES_PASSWORD: local-status-demo-only
+    volumes:
+      - status_demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rps_status_demo -d rps_status_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  status_demo_postgres_data:
+  status_demo_frontend_node_modules:
+  status_demo_frontend_next:

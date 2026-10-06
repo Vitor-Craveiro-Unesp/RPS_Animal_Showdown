@@ -40,7 +40,7 @@ class StrategyIntent(IntentModel):
 
 class CreateTournamentIntent(IntentModel):
     capacity: Annotated[int, Field(ge=1)]
-    hearts_required: Annotated[int, Field(ge=1)]
+    hearts_required: Annotated[int, Field(ge=1, le=4)]
     sound_effects_enabled: bool = True
     background_music_enabled: bool = True
     movement_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
@@ -68,7 +68,7 @@ class JoinTournamentIntent(IntentModel):
 
 class TournamentConfigurationIntent(IntentModel):
     capacity: Annotated[int, Field(ge=1)]
-    hearts_required: Annotated[int, Field(ge=1)]
+    hearts_required: Annotated[int, Field(ge=1, le=4)]
     sound_effects_enabled: bool = True
     background_music_enabled: bool = True
     movement_speed: Literal["0.5", "1", "2", "4", "8"] = "1"
@@ -79,5 +79,14 @@ class EmptyIntent(IntentModel):
     """Explicitly rejects forged official state on bodyless commands."""
 
 
+class RepeatTournamentIntent(IntentModel):
+    expected_run_id: Annotated[str, Field(pattern=r"^[0-9a-fA-F-]{36}$")]
+
+
 class TrainingChoiceIntent(IntentModel):
     move: Annotated[str, Field(pattern=r"^(rock|paper|scissors)$")]
+
+
+class GuestTrainingChoiceIntent(TrainingChoiceIntent):
+    hearts_required: Annotated[int, Field(ge=1, le=5)]
+    strategy: StrategyIntent

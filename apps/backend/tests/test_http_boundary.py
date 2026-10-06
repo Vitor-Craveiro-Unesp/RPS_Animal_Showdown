@@ -141,6 +141,19 @@ def test_service_requires_durable_database_without_an_explicit_unit_store(monkey
         create_app()
 
 
+def test_production_requires_explicit_cors_origins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    with pytest.raises(RuntimeError, match="ALLOWED_ORIGINS is required"):
+        create_app(store=InMemoryTournamentStore())
+
+
+def test_cors_origin_must_be_an_exact_http_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://rps.example/with-a-path")
+    with pytest.raises(RuntimeError, match="absolute HTTP"):
+        create_app(store=InMemoryTournamentStore())
+
+
 def test_codes_are_opaque_and_nonsequential() -> None:
     codes = {generate_tournament_code() for _ in range(100)}
     assert len(codes) == 100
@@ -163,6 +176,56 @@ def test_tournament_uses_uuid_internally_and_code_only_as_public_access() -> Non
     assert current.status_code == 200
     assert current.json()["hearts_required"] == 2
     assert "strategy" not in current.json()["player"]
+
+
+def test_anonymous_creation_issues_a_room_scoped_organizer_capability_without_leaking_it(caplog: pytest.LogCaptureFixture) -> None:
+    """No account is needed, but the public room code never becomes admin auth."""
+    store = InMemoryTournamentStore()
+    client = TestClient(create_app(store=store))
+    caplog.set_level("INFO", logger="app.main")
+
+    created = client.post("/v1/tournaments", json={"capacity": 8, "hearts_required": 2})
+    assert created.status_code == 201
+    room = created.json()
+    code = str(room["tournament_code"])
+    token = str(room["organizer_access_token"])
+    assert token and token != code
+    assert len(token) >= 32
+    assert token not in repr(store.get_tournament(code))
+    assert token not in caplog.text
+
+    # Missing, random, and public-code credentials all fail identically enough
+    # to avoid creating an administrative oracle.
+    admin_path = f"/v1/tournaments/{code}/admin/participants"
+    assert client.get(admin_path).status_code == 401
+    assert client.get(admin_path, headers=bearer("not-an-organizer-token")).status_code == 401
+    assert client.get(admin_path, headers=bearer(code)).status_code == 401
+
+    participant = join_tournament(client, code, "Participant")
+    player_headers = bearer(str(participant["player_access_token"]))
+    assert client.get(admin_path, headers=player_headers).status_code == 403
+    assert client.patch(
+        f"/v1/tournaments/{code}/admin/configuration",
+        json={"capacity": 8, "hearts_required": 2}, headers=player_headers,
+    ).status_code == 403
+    assert client.post(
+        f"/v1/tournaments/{code}/admin/start", json={}, headers=player_headers,
+    ).status_code == 403
+    assert client.get(admin_path, headers=bearer(token)).status_code == 200
+
+
+@pytest.mark.parametrize("hearts_required", [0, 5, 1_000_000])
+def test_only_approved_one_to_four_heart_formats_are_accepted(hearts_required: int) -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    assert client.post(
+        "/v1/tournaments", json={"capacity": 8, "hearts_required": hearts_required},
+    ).status_code == 422
+    room = create_tournament(client)
+    assert client.patch(
+        f"/v1/tournaments/{room['tournament_code']}/admin/configuration",
+        json={"capacity": 8, "hearts_required": hearts_required},
+        headers=bearer(str(room["organizer_access_token"])),
+    ).status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -255,6 +318,42 @@ def test_admin_authorization_is_room_scoped_and_limits_invalid_credentials_befor
     assert client.get(f"/v1/tournaments/{first_code}/admin/participants", headers=bearer("invalid")).status_code == 429
 
 
+def test_organizer_participant_list_exposes_membership_status_and_removal_history() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    tournament = create_tournament(client)
+    code = str(tournament["tournament_code"])
+    organizer_headers = bearer(str(tournament["organizer_access_token"]))
+
+    player = join_tournament(client, code, "Status player")
+    player_headers = bearer(str(player["player_access_token"]))
+    initial = client.get(f"/v1/tournaments/{code}/admin/participants", headers=organizer_headers)
+    assert initial.status_code == 200
+    assert initial.json()["participants"] == [
+        {
+            "player_id": player["player"]["player_id"],
+            "display_name": "Status player",
+            "animal_id": "tiger",
+            "ready": False,
+            "strategy_locked": False,
+            "membership_status": "joined",
+            "removed": False,
+        }
+    ]
+
+    assert client.put(f"/v1/tournaments/{code}/players/me/strategy", json=strategy_payload(), headers=player_headers).status_code == 204
+    configuring = client.get(f"/v1/tournaments/{code}/admin/participants", headers=organizer_headers).json()["participants"][0]
+    assert configuring["membership_status"] == "configuring_strategy"
+
+    assert client.post(f"/v1/tournaments/{code}/players/me/ready", json={}, headers=player_headers).status_code == 204
+    ready = client.get(f"/v1/tournaments/{code}/admin/participants", headers=organizer_headers).json()["participants"][0]
+    assert ready["membership_status"] == "ready"
+
+    assert client.delete(f"/v1/tournaments/{code}/admin/players/{player['player']['player_id']}", headers=organizer_headers).status_code == 204
+    removed = client.get(f"/v1/tournaments/{code}/admin/participants", headers=organizer_headers).json()["participants"][0]
+    assert removed["membership_status"] == "removed"
+    assert removed["removed"] is True
+
+
 def test_join_errors_are_neutral_for_invalid_and_closed_codes() -> None:
     client = TestClient(create_app(store=InMemoryTournamentStore()))
     unavailable = client.post(
@@ -314,7 +413,7 @@ def test_official_start_invokes_engine_from_server_snapshot_locks_strategies_and
     assert record.started and not record.registration_open
     assert record.official_state_reference == body["state_reference"]
     assert record.official_state_snapshot is not None
-    assert record.official_state_snapshot["schema_version"] == 1
+    assert record.official_state_snapshot["schema_version"] == 3
     assert record.official_state_snapshot["kind"] == "tournament_state"
     assert record.official_state_snapshot["tournament_id"] == tournament["tournament_id"]
     assert {player["player"]["player_id"] for player in (first, second)} == {
@@ -357,9 +456,44 @@ def test_training_uses_engine_state_isolated_from_the_official_tournament_and_en
     assert record.official_state_snapshot is None
     assert first["player"]["player_id"] in record.training_sessions
 
+    assert client.post(f"/v1/tournaments/{code}/training/reset", headers=headers).status_code == 204
+    assert first["player"]["player_id"] not in record.training_sessions
+    fresh_turn = client.post(f"/v1/tournaments/{code}/training/choice", json={"move": "paper"}, headers=headers)
+    assert fresh_turn.status_code == 200
+    assert fresh_turn.json()["training_id"] != first_turn.json()["training_id"]
+    assert len(fresh_turn.json()["state"]["rounds"]) == 1
+
     assert client.post(f"/v1/tournaments/{code}/admin/start", json={}, headers=bearer(str(tournament["organizer_access_token"]))).status_code == 200
     assert not record.training_sessions
     assert client.post(f"/v1/tournaments/{code}/training/choice", json={"move": "rock"}, headers=headers).status_code == 409
+
+
+def test_guest_training_is_server_calculated_without_creating_a_tournament() -> None:
+    store = InMemoryTournamentStore()
+    client = TestClient(create_app(store=store))
+    intent = {"move": "rock", "hearts_required": 5, "strategy": strategy_payload()}
+    first = client.post("/v1/training/guest/choice", json=intent)
+    assert first.status_code == 200
+    assert first.json()["state"]["initial_hearts"] == 5
+    assert first.json()["state"]["manual_hearts"] in {4, 5}
+    assert first.json()["state"]["character_hearts"] in {4, 5}
+    assert 5 in {
+        first.json()["state"]["manual_hearts"],
+        first.json()["state"]["character_hearts"],
+    }
+    second = client.post(
+        "/v1/training/guest/choice",
+        json={**intent, "move": "paper"},
+        headers={"X-Training-Session": first.json()["training_id"]},
+    )
+    assert second.status_code == 200
+    assert second.json()["training_id"] == first.json()["training_id"]
+    assert len(second.json()["state"]["rounds"]) == 2
+    assert not store._tournaments
+
+    assert client.post("/v1/training/guest/choice", json={**intent, "hearts_required": 0}).status_code == 422
+    assert client.post("/v1/training/guest/choice", json={**intent, "hearts_required": 6}).status_code == 422
+    assert client.post("/v1/training/guest/choice", json={"move": "rock", "hearts_required": 2}).status_code == 422
 
 
 def test_cors_allows_only_the_explicit_local_origin() -> None:
