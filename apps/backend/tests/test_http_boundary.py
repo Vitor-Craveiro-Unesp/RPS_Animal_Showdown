@@ -510,6 +510,71 @@ def test_cors_allows_only_the_explicit_local_origin() -> None:
     assert "access-control-allow-origin" not in denied.headers
 
 
+def test_api_security_headers_prevent_caching_of_capability_responses() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    response = client.post("/v1/tournaments", json={"capacity": 8, "hearts_required": 2})
+
+    assert response.status_code == 201
+    assert response.headers["cache-control"] == "no-store, private, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_api_rejects_declared_bodies_over_the_public_boundary_limit() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+
+    response = client.post(
+        "/v1/tournaments",
+        content=b"{}",
+        headers={"Content-Length": str(64 * 1024 + 1), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.headers["cache-control"] == "no-store, private, max-age=0"
+
+
+def test_production_disables_interactive_api_docs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://rps.example")
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_every_admin_mutation_rejects_missing_and_cross_tournament_capabilities() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    first, second = create_tournament(client), create_tournament(client)
+    code = str(first["tournament_code"])
+    cross_headers = bearer(str(second["organizer_access_token"]))
+    requests = (
+        ("patch", f"/v1/tournaments/{code}/admin/configuration", {"capacity": 8, "hearts_required": 2}),
+        ("post", f"/v1/tournaments/{code}/admin/close-registration", {}),
+        ("delete", f"/v1/tournaments/{code}/admin/players/{uuid4()}", None),
+        ("post", f"/v1/tournaments/{code}/admin/start", {}),
+        ("post", f"/v1/tournaments/{code}/admin/access/revoke", {}),
+    )
+
+    for method, path, payload in requests:
+        invoke = getattr(client, method)
+        missing = invoke(path, **({"json": payload} if payload is not None else {}))
+        foreign = invoke(path, headers=cross_headers, **({"json": payload} if payload is not None else {}))
+        assert missing.status_code == 401
+        assert foreign.status_code == 403
+
+
+@pytest.mark.parametrize("display_name", ("<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "مرحبا 🐼 中文"))
+def test_participant_names_are_preserved_as_plain_validated_text(display_name: str) -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    tournament = create_tournament(client)
+    joined = join_tournament(client, str(tournament["tournament_code"]), display_name)
+
+    assert joined["player"]["display_name"] == display_name
+
+
 def test_rate_limits_are_operation_specific_and_recover_after_the_window() -> None:
     now = [0.0]
     limiter = SlidingWindowRateLimiter(clock=lambda: now[0])

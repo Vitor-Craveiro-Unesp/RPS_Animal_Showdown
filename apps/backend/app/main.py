@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .engine_gateway import (
     GameEngineAdapter,
@@ -71,6 +72,7 @@ RATE_LIMITS = {
 
 DEFAULT_ALLOWED_ORIGINS = ("http://localhost:3000",)
 PRODUCTION_ENVIRONMENT = "production"
+MAX_API_BODY_BYTES = 64 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -162,6 +164,7 @@ def create_app(
 ) -> FastAPI:
     """Build an app with replaceable infrastructure adapters for tests/deploy."""
     database_url = getenv("DATABASE_URL")
+    is_production = getenv("APP_ENV", "development").strip().lower() == PRODUCTION_ENVIRONMENT
     if store is None and not database_url:
         raise RuntimeError(
             "DATABASE_URL is required for the API service. "
@@ -180,7 +183,16 @@ def create_app(
         else SlidingWindowRateLimiter()
     )
     engine_gateway = engine or GameEngineAdapter()
-    app = FastAPI(title="RPS: Animal Showdown API", version="0.1.0")
+    # The public client never needs the framework's interactive API explorer.
+    # Keep it useful in local development while reducing production endpoint
+    # discovery and avoiding a script-bearing surface on the API origin.
+    app = FastAPI(
+        title="RPS: Animal Showdown API",
+        version="0.1.0",
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
+    )
     # Bearer capabilities are carried in Authorization headers, never cookies.
     # Consequently this boundary does not accept credentialed CORS requests and
     # does not need a cookie-CSRF exception. Production supplies an exact list.
@@ -191,6 +203,39 @@ def create_app(
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        """Set response hardening independently of the deployment proxy.
+
+        Bearer capabilities and short-lived realtime tickets are delivered in
+        JSON only.  Explicitly prevent browser/proxy caching for every API
+        response so a successful creation or join response cannot be replayed
+        from shared history or cache storage.
+        """
+        content_length = request.headers.get("content-length")
+        if request.url.path.startswith("/v1/") and content_length:
+            try:
+                body_is_too_large = int(content_length) > MAX_API_BODY_BYTES
+            except ValueError:
+                response = JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": "Invalid Content-Length."})
+            else:
+                response = (
+                    JSONResponse(status_code=status.HTTP_413_CONTENT_TOO_LARGE, content={"detail": "Request body too large."})
+                    if body_is_too_large
+                    else await call_next(request)
+                )
+        else:
+            response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        if request.url.path.startswith("/v1/"):
+            response.headers.setdefault("Cache-Control", "no-store, private, max-age=0")
+            response.headers.setdefault("Pragma", "no-cache")
+        return response
 
     def limit(request: Request, operation: str, subject: str | None = None) -> None:
         try:
