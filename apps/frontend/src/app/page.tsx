@@ -237,8 +237,6 @@ export default function HomePage() {
   }, [presentationQueue, tournamentId]);
   const t = (key: any) => text(locale, key);
   const u = (key: string) => uiText(locale, key);
-  const homeActionLabel = (key: string) => u(key).split("\n").map((line, index) => <span key={`${key}-${index}`}>{line}</span>);
-  const homeActionAria = (key: string) => u(key).replace("\n", " ");
   const requestFailureMessage = requestRateLimited ? t("rateLimited") : t("network");
   const distribution = strategy[condition];
   const total = distribution.rock + distribution.paper + distribution.scissors;
@@ -768,15 +766,15 @@ export default function HomePage() {
 
     {screen === "home" && <section className="hero">
       <div>
-        <span className="eyebrow"><span>{u("liveArena")}</span><span className="live-indicator" aria-hidden="true" /></span>
+        <span className="eyebrow">{u("liveArena")}</span>
         <h1>RPS<br />ANIMAL<br />SHOWDOWN</h1>
         <div className="animal-showcase" role="img" aria-label={t("tagline")}>
           {animalShowcaseRows.map((row, rowIndex) => <div className="animal-row" key={rowIndex}>{row.map((emoji, emojiIndex) => <span key={`${rowIndex}-${emojiIndex}`}>{emoji}</span>)}</div>)}
         </div>
         <div className="cta-row">
-          <button className="button home-action home-action-join" aria-label={homeActionAria("homeJoinAction")} onClick={() => setScreen("join")}>{homeActionLabel("homeJoinAction")}</button>
-          <button className="button home-action home-action-create" aria-label={homeActionAria("homeCreateAction")} onClick={() => { clearRequestFailure(); setScreen("create"); }}>{homeActionLabel("homeCreateAction")}</button>
-          <button className="button home-action home-action-training" aria-label={homeActionAria("homeTrainingAction")} onClick={() => { tournamentStartedRef.current = false; clearRequestFailure(); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{homeActionLabel("homeTrainingAction")}</button>
+          <button className="button" onClick={() => setScreen("join")}>{t("join")}</button>
+          <button className="button secondary" onClick={() => { clearRequestFailure(); setScreen("create"); }}>{t("create")}</button>
+          <button className="button secondary" onClick={() => { tournamentStartedRef.current = false; clearRequestFailure(); setTrainingState(null); setTrainingAvatar(null); setGuestTrainingId(""); setGuestHearts(null); setHoveredGuestHearts(0); setScreen("guest-animal"); }}>{u("guestTraining")}</button>
         </div>
       </div>
       <aside className="sponsor">
