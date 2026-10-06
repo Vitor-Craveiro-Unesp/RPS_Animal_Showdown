@@ -6,6 +6,7 @@ import CinematicArena from "./cinematic-arena";
 import { PresentationQueue } from "./presentation.mjs";
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
+import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
 import { restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { animalName, animalShowcaseRows, Locale, localeNames, locales, regionName, scientificName, text, uiText } from "../i18n/catalog";
 import { animalRushRoundDuration, randomAnimalRushMove, resolveAnimalRushAnswer, winningAnimalRushMove } from "./animal-rush.mjs";
@@ -198,7 +199,7 @@ export default function HomePage() {
   }, [presentationQueue]);
   const [officialState, setOfficialState] = useState<OfficialState | null>(null);
   const [officialEvents, setOfficialEvents] = useState<OfficialEvent[]>([]);
-  const [realtimeStatus, setRealtimeStatus] = useState<"connecting" | "live" | "fallback">("connecting");
+  const [realtimeStatus, setRealtimeStatus] = useState<"connecting" | "snapshot" | "live" | "fallback">("connecting");
   const [rushPrompt, setRushPrompt] = useState<AnimalRushMove>("rock");
   const [rushScore, setRushScore] = useState(0);
   const [rushStreak, setRushStreak] = useState(0);
@@ -350,7 +351,7 @@ export default function HomePage() {
   }, [code, interruptForOfficialStart, playerToken, realtimeEligible, realtimeStatus, reconcilePresentation]);
 
   useEffect(() => {
-    if (realtimeStatus !== "fallback" || !code || !(organizerToken || playerToken) || !realtimeEligible) return;
+    if (!shouldPollOfficialSnapshot(realtimeStatus) || !code || !(organizerToken || playerToken) || !realtimeEligible) return;
     let disposed = false;
     const refreshOfficial = async () => {
       const token = playerToken || organizerToken;
@@ -389,6 +390,7 @@ export default function HomePage() {
     let socket: WebSocket | null = null;
     let retryTimer: number | undefined;
     let attempt = 0;
+    let hasSynchronizedSnapshot = Boolean(lastOfficialStateRef.current);
     const accessToken = organizerToken || playerToken;
     const sequenceKey = `rps-realtime-sequence:${tournamentId || code}`;
     const eventsKey = `rps-realtime-events:${tournamentId || code}`;
@@ -401,10 +403,12 @@ export default function HomePage() {
 
     const loadSnapshot = async () => {
       const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${accessToken}` } });
-      if (response.status === 409) return;
+      if (response.status === 409) return null;
       if (!response.ok) throw new Error("official-state unavailable");
       const payload = await response.json() as OfficialState;
       if (!disposed) {
+        hasSynchronizedSnapshot = true;
+        setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: true, websocketSubscribed: false }));
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
@@ -420,10 +424,11 @@ export default function HomePage() {
         if (typeof payload.hearts_per_match === "number") setHeartsRequired(payload.hearts_per_match);
         interruptForOfficialStart();
       }
+      return payload;
     };
     const scheduleReconnect = () => {
       if (disposed) return;
-      setRealtimeStatus("connecting");
+      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: false }));
       if (attempt >= 5) { setRealtimeStatus("fallback"); return; }
       const delay = Math.min(1_000 * 2 ** attempt, 16_000);
       attempt += 1;
@@ -435,7 +440,7 @@ export default function HomePage() {
       return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000/v1/realtime`;
     };
     const connect = async () => {
-      setRealtimeStatus("connecting");
+      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: false }));
       try {
         const ticketResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/realtime/ticket`, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
         if (!ticketResponse.ok) throw new Error("ticket unavailable");
@@ -448,7 +453,7 @@ export default function HomePage() {
         socket.onmessage = (message) => {
           let frame: Record<string, unknown>;
           try { frame = JSON.parse(String(message.data)) as Record<string, unknown>; } catch { return; }
-          if (frame.type === "subscribed") { attempt = 0; setRealtimeStatus("live"); socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current })); return; }
+          if (frame.type === "subscribed") { attempt = 0; setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed: true })); socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current })); return; }
           if (frame.type === "replay-reset" && Number.isSafeInteger(frame.afterSequence) && Number(frame.afterSequence) >= 0) {
             lastSequenceRef.current = Math.max(lastSequenceRef.current, Number(frame.afterSequence));
             sessionStorage.setItem(sequenceKey, String(lastSequenceRef.current));
@@ -563,6 +568,31 @@ export default function HomePage() {
     if (!response.ok) return reportRequestFailure(response);
     clearRequestFailure();
     tournamentStartedRef.current = true;
+    // The Start response is authoritative, but the organizer must not wait for
+    // a later WebSocket handshake before receiving the server snapshot.
+    try {
+      const snapshot = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${organizerToken}` } });
+      if (!snapshot.ok) throw new Error("official-state unavailable");
+      const state = await snapshot.json() as OfficialState;
+      const version = state.state_version ?? 0;
+      if (version >= latestVersionRef.current) {
+        synchronizeRun(state);
+        latestVersionRef.current = version;
+        lastOfficialStateRef.current = state;
+        setOfficialState(state);
+        reconcilePresentation(version);
+      }
+      if (typeof state.sound_effects_enabled === "boolean") setSoundEffectsEnabled(state.sound_effects_enabled);
+      if (typeof state.background_music_enabled === "boolean") setBackgroundMusicEnabled(state.background_music_enabled);
+      if (state.movement_speed) setMovementSpeed(state.movement_speed);
+      if (state.countdown_speed) setCountdownSpeed(state.countdown_speed);
+      if (typeof state.hearts_per_match === "number") setHeartsRequired(state.hearts_per_match);
+      setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: true, websocketSubscribed: false }));
+    } catch {
+      // A transient snapshot failure cannot undo an already accepted Start;
+      // the realtime effect continues its authenticated reconnection path.
+      setRealtimeStatus("connecting");
+    }
     setScreen("arena");
   }
 
