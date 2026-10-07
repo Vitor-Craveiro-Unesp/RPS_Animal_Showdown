@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationQueue, eventSteps, duration } from './presentation.mjs';
+import { PresentationQueue, eventSteps, duration, stateForPresentation } from './presentation.mjs';
 import { AUDIO_ASSETS, AudioManager } from './audio-manager.mjs';
 
 const event = (sequence, eventType = 'round_resolved', stateVersion = sequence) => ({ eventId: `id-${sequence}`, sequence, eventType, payload: { stateVersion } });
@@ -76,13 +76,58 @@ test('a tie uses the local tie cue only when the authoritative outcome is tie', 
   audio.effect(tied.at(-1).sound); assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.tie);
 });
 
-test('champion cue always precedes podium cue and replaces it rather than overlapping', () => {
+test('the winner appears alone before silver, bronze and the looping podium music', async () => {
   const h = host(), audio = new AudioManager(h); audio.configure(true, false);
   const steps = eventSteps(event(9, 'champion'));
-  assert.deepEqual(steps.map(step => [step.phase, step.sound]), [['champion', 'champion'], ['podium', 'podium']]);
-  audio.effect(steps[0].sound); const champion = audio.channels.get('effect');
-  audio.effect(steps[1].sound); assert.equal(champion.paused, true); assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.podium);
+  assert.deepEqual(steps.map(step => [step.phase, step.sound]), [
+    ['champion', 'champion'], ['podium_second', null], ['podium_third', null], ['podium', 'podium'],
+  ]);
+  audio.effect(steps[0].sound);
+  const champion = audio.channels.get('effect');
+  let finished = false;
+  const completion = audio.whenFinished('effect').then(() => { finished = true; });
+  assert.equal(finished, false);
+  champion.onended();
+  await completion;
+  assert.equal(finished, true);
+  audio.effect(steps.at(-1).sound);
+  assert.equal(audio.channels.get('effect').src, AUDIO_ASSETS.effects.podium);
+  assert.equal(audio.channels.get('effect').loop, true);
   assert.equal(eventSteps(event(8, 'podium_decided')).length, 0);
+});
+
+test('the live bracket uses prior server state until the loss and victory are shown', () => {
+  const priorMatch = { match_id: 'm1', player_one_hearts: 2, player_two_hearts: 2, winner_id: null, loser_id: null };
+  const nextMatch = { ...priorMatch, player_one_hearts: 1, winner_id: 'p2', loser_id: 'p1' };
+  const previous = { completed_rounds: [], current_round: { number: 1, matches: [priorMatch] }, champion_id: null };
+  const next = { completed_rounds: [{ number: 1, matches: [nextMatch] }], current_round: null, champion_id: 'p2' };
+  for (const phase of ['countdown', 'reveal', 'result']) assert.equal(stateForPresentation(previous, next, phase, 'm1'), previous);
+  const heart = stateForPresentation(previous, next, 'heart', 'm1');
+  assert.equal(heart.current_round.matches[0].player_one_hearts, 1);
+  assert.equal(heart.current_round.matches[0].winner_id, null);
+  assert.equal(heart.champion_id, null);
+  assert.equal(stateForPresentation(previous, next, 'victory', 'm1'), next);
+});
+
+test('effects and animal cues share the foreground without overlap', async () => {
+  const h = host(), audio = new AudioManager(h);
+  audio.configure(true, true);
+  audio.effect('tie');
+  const tie = audio.channels.get('effect');
+  audio.effect('heart_lost');
+  assert.equal(tie.paused, true);
+  const heart = audio.channels.get('effect');
+  const completed = audio.whenFinished('effect');
+  audio.winner('tiger');
+  await completed;
+  assert.equal(heart.paused, true);
+  assert.equal(audio.channels.get('animal').src, AUDIO_ASSETS.animals.tiger);
+  audio.effect('champion');
+  assert.equal(audio.channels.has('animal'), false);
+  assert.equal(audio.channels.has('background'), false);
+  audio.effect('podium');
+  assert.equal(audio.channels.get('effect').loop, true);
+  assert.equal(audio.channels.has('background'), false);
 });
 
 test('narration is independent from effects and contains canonical scientific name in every supported locale', () => {

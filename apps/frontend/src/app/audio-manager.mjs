@@ -23,7 +23,7 @@ export class AudioManager {
   // The organizer control defaults to effects enabled. Starting with that same
   // value also makes an animal click safe during the first client hydration;
   // configure(false, ...) immediately silences it for an official OFF setting.
-  constructor(host) { this.host = host; this.channels = new Map(); this.effects = true; this.music = false; this.celebrating = false; this.unlocked = false; }
+  constructor(host) { this.host = host; this.channels = new Map(); this.waiters = new Map(); this.effects = true; this.music = false; this.celebrating = false; this.unlocked = false; }
   unlock() { this.unlocked = true; return Boolean(this.host.Audio || this.host.document?.createElement); }
   make(source, loop = false, volume = .5) {
     if (!this.host.Audio && !this.host.document?.createElement) return null;
@@ -40,6 +40,8 @@ export class AudioManager {
     } catch { return null; }
   }
   stop(channel) {
+    const waiter = this.waiters.get(channel);
+    if (waiter) { this.waiters.delete(channel); waiter(); }
     const audio = this.channels.get(channel); if (!audio) return;
     try { audio.onended = null; audio.pause?.(); audio.currentTime = 0; audio.remove?.(); } catch {}
     this.channels.delete(channel);
@@ -48,20 +50,33 @@ export class AudioManager {
     this.stop(channel);
     const audio = this.make(source, loop, volume); if (!audio) return false;
     this.channels.set(channel, audio);
-    if (!loop) audio.onended = () => { if (this.channels.get(channel) === audio) this.channels.delete(channel); };
-    try { void audio.play?.().catch(() => {}); } catch {}
+    if (!loop) audio.onended = () => { if (this.channels.get(channel) === audio) this.stop(channel); };
+    audio.onerror = () => { if (this.channels.get(channel) === audio) this.stop(channel); };
+    try { void audio.play?.().catch(() => { if (this.channels.get(channel) === audio) this.stop(channel); }); } catch { this.stop(channel); return false; }
     return true;
+  }
+  whenFinished(channel) {
+    const audio = this.channels.get(channel);
+    if (!audio || audio.loop) return Promise.resolve();
+    return new Promise(resolve => this.waiters.set(channel, resolve));
   }
   configure(effects, music) {
     this.effects = Boolean(effects);
-    if (!this.effects) { this.stop('effect'); this.stop('animal'); }
+    if (!this.effects) { this.stop('effect'); this.stop('animal'); this.celebrating = false; }
     this.music = Boolean(music);
     if (!this.music) { this.stop('background'); return; }
+    if (this.celebrating) return;
     const current = this.channels.get('background');
     if (!current || current.src?.endsWith(AUDIO_ASSETS.background) === false) this.play('background', AUDIO_ASSETS.background, { loop: true, volume: .24 });
   }
-  effect(kind) { const source = AUDIO_ASSETS.effects[kind]; return Boolean(this.effects && source && this.play('effect', source, { volume: .55 })); }
-  animal(animalId, zombie = false) { this.cancelSpeech(); const source = zombie ? AUDIO_ASSETS.animals.zombie : AUDIO_ASSETS.animals[animalId]; return Boolean(this.effects && source && this.play('animal', source, { volume: .65 })); }
+  effect(kind) {
+    const source = AUDIO_ASSETS.effects[kind];
+    if (!this.effects || !source) return false;
+    this.stop('animal');
+    if (kind === 'champion' || kind === 'podium') { this.celebrating = true; this.stop('background'); }
+    return this.play('effect', source, { loop: kind === 'podium', volume: .55 });
+  }
+  animal(animalId, zombie = false) { this.cancelSpeech(); const source = zombie ? AUDIO_ASSETS.animals.zombie : AUDIO_ASSETS.animals[animalId]; if (!this.effects || !source) return false; this.stop('effect'); return this.play('animal', source, { volume: .65 }); }
   winner(animalId, zombie = false) { return this.animal(animalId, zombie); }
   resetRun() { const effects = this.effects, music = this.music; this.stopAll(); this.configure(effects, music); }
   cancelSpeech() { this.host.speechSynthesis?.cancel?.(); }

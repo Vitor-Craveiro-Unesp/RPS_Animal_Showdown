@@ -14,11 +14,37 @@ export function eventSteps(event, movement = 1, countdown = 1) {
     case 'match_completed': return [step('victory', 750)];
     case 'player_advanced': return [step('advance', 900)];
     case 'bye': return [step('bye', 900)];
-    // podium_decided arrives before champion in the official event log. The visual
-    // timeline intentionally delays the podium until after the champion cue.
-    case 'champion': return [step('champion', 1600, 'champion'), step('podium', 900, 'podium')];
+    // podium_decided arrives before champion in the official event log. Reveal
+    // the winner first, then the other places, then start the looping podium cue.
+    case 'champion': return [
+      { ...step('champion', 0, 'champion'), ms: 1600 },
+      { ...step('podium_second', 0), ms: 900 },
+      { ...step('podium_third', 0), ms: 900 },
+      step('podium', 0, 'podium'),
+    ];
     default: return [];
   }
+}
+
+// These are server snapshots. The presentation only controls when each part of
+// an already-authoritative transition becomes visible to the audience.
+export function stateForPresentation(previous, next, phase, matchId) {
+  if (!previous) return next ?? null;
+  if (!next || !matchId) return previous;
+  if (phase === 'victory') return next;
+  if (phase !== 'heart') return previous;
+  const nextMatch = [...next.completed_rounds, ...(next.current_round ? [next.current_round] : [])]
+    .flatMap(round => round.matches).find(match => match.match_id === matchId);
+  if (!nextMatch) return previous;
+  const updateRound = round => round && ({ ...round, matches: round.matches.map(match =>
+    match.match_id === matchId ? { ...match,
+      player_one_hearts: nextMatch.player_one_hearts,
+      player_two_hearts: nextMatch.player_two_hearts,
+    } : match) });
+  return { ...previous,
+    completed_rounds: previous.completed_rounds.map(updateRound),
+    current_round: updateRound(previous.current_round),
+  };
 }
 export class PresentationQueue {
   constructor() { this.pending = []; this.sequence = 0; this.ids = new Set(); this.floorVersion = -1; this.generation = 0; }
