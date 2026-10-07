@@ -57,7 +57,7 @@ from .store import (
 
 
 RATE_LIMITS = {
-    "create": RateLimit(max_requests=5, window_seconds=3600),
+    "create": RateLimit(max_requests=12, window_seconds=3600),
     "join": RateLimit(max_requests=12, window_seconds=600),
     "strategy": RateLimit(max_requests=20, window_seconds=60),
     "admin": RateLimit(max_requests=20, window_seconds=60),

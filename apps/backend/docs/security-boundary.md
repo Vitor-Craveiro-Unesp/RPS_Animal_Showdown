@@ -49,7 +49,7 @@ SHA-256 subject key, resetting it only after its database TTL has expired. This
 is shared by all API instances and avoids an additional V0.1 service. Local
 `SlidingWindowRateLimiter` is limited to isolated unit-test injection.
 
-Limits are operation-specific: creation 5/hour; join 12/10 minutes;
+Limits are operation-specific: creation 12/hour; join 12/10 minutes;
 strategy/ready 20/minute; training 30/minute; administration 20/minute;
 participant-authentication 20/minute; and realtime ticket/handshake 30/minute.
 Every request consumes a key based on `ip:<ASGI peer>`; bearer-bearing actions

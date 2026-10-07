@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app.main import RATE_LIMITS, create_app
 from app.postgres_store import PostgresTournamentStore
 from app.security import (
     PostgresFixedWindowRateLimiter,
@@ -593,6 +593,13 @@ def test_rate_limits_are_operation_specific_and_recover_after_the_window() -> No
     now[0] = 10.0
     limiter.check("join", "client-a", limit)
     limiter.check("admin", "client-a", limit)
+
+
+def test_tournament_creation_allows_twelve_requests_per_hour() -> None:
+    create_limit = RATE_LIMITS["create"]
+
+    assert create_limit.max_requests == 12
+    assert create_limit.window_seconds == 3600
 
 
 def test_shared_limiter_failure_is_explicit_and_never_downgrades_to_local_memory() -> None:
