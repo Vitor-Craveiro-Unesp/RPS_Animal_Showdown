@@ -423,6 +423,12 @@ def test_official_start_invokes_engine_from_server_snapshot_locks_strategies_and
         competitor["player_id"] for competitor in record.official_state_snapshot["competitors"]
     }
     assert tournament_state_from_snapshot(record.official_state_snapshot).tournament_id == tournament["tournament_id"]
+    official = client.get(
+        f"/v1/tournaments/{code}/official-state",
+        headers=bearer(str(first["player_access_token"])),
+    )
+    assert official.status_code == 200
+    assert isinstance(official.json()["server_time_ms"], int)
     assert client.put(
         f"/v1/tournaments/{code}/players/me/strategy",
         json=strategy_payload(),

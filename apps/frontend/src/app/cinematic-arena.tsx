@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { officialOutcomeClass, scheduledSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
 import { AudioManager } from "./audio-manager.mjs";
 
@@ -20,9 +20,14 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
   const [podiumPresented, setPodiumPresented] = useState(() => Boolean(state?.champion_id && !state?.presentation_state && !queue.pending.length));
   const [visibleSequence, setVisibleSequence] = useState(() => queue.pending.length ? queue.pending[0].sequence - 1 : events.at(-1)?.sequence ?? 0);
   const stateRef = useRef(state);
+  const playbackRef = useRef({ movement, countdown, audio });
+  const stepsRef = useRef<Step[]>([]);
+  const generationRef = useRef(queue.generation);
   const roundTransitionRef = useRef<{ before: State | null; after: State | null; matchId: string | null } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { playbackRef.current = { movement, countdown, audio }; }, [movement, countdown, audio]);
+  useEffect(() => () => { playbackRef.current.audio?.stop('effect'); playbackRef.current.audio?.stop('animal'); }, []);
   const visibleState = presentationState ?? state;
   const allRounds = visibleState ? [...visibleState.completed_rounds, ...(visibleState.current_round ? [visibleState.current_round] : [])] : [];
   const player = (id: string | null) => visibleState?.players.find(item => item.player_id === id);
@@ -32,30 +37,28 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
-    let steps: Step[] = [];
-    let generation = queue.generation;
     const pump = () => {
       if (stopped) return;
-      if (generation !== queue.generation) {
-        generation = queue.generation; steps = []; roundTransitionRef.current = null;
+      if (generationRef.current !== queue.generation) {
+        generationRef.current = queue.generation; stepsRef.current = []; roundTransitionRef.current = null;
         setStep(null); setMatch(null); setPresentationState(stateRef.current?.presentation_state ?? stateRef.current);
         setPodiumPresented(Boolean(stateRef.current?.champion_id && !stateRef.current?.presentation_state));
-        audio?.stop('effect'); audio?.stop('animal');
+        playbackRef.current.audio?.stop('effect'); playbackRef.current.audio?.stop('animal');
       }
-      if (!steps.length) {
+      if (!stepsRef.current.length) {
         const event = queue.next();
         if (event) {
-          steps = scheduledSteps(event, Number(movement), Number(countdown)) as Step[];
-          if (!steps.length && event.eventType !== 'podium_decided') setVisibleSequence(sequence => Math.max(sequence, event.sequence));
+          stepsRef.current = scheduledSteps(event, Number(playbackRef.current.movement), Number(playbackRef.current.countdown)) as Step[];
+          if (!stepsRef.current.length && event.eventType !== 'podium_decided') setVisibleSequence(sequence => Math.max(sequence, event.sequence));
         }
       }
-      const next = steps.shift();
+      const next = stepsRef.current.shift();
       if (!next) {
         if (!queue.pending.length) { setStep(null); setMatch(null); }
         timer = setTimeout(pump, 60); return;
       }
       const untilStart = next.startsAtMs - Date.now();
-      if (untilStart > 0) { steps.unshift(next); timer = setTimeout(pump, untilStart); return; }
+      if (untilStart > 0) { stepsRef.current.unshift(next); timer = setTimeout(pump, untilStart); return; }
       const onTime = next.ms === 0 || Date.now() < next.startsAtMs + next.ms;
       if (onTime) setStep(next);
       const payload = next.event.payload ?? {};
@@ -86,16 +89,16 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       if (next.phase === 'countdown') setMatch(current => current?.match_id === payload.matchId ? current : previousMatch ?? officialMatch ?? null);
       const eventPlayers = eventState?.players ?? stateRef.current?.players ?? [];
       const soundPlayer = eventPlayers.find((item: Player) => item.player_id === (payload.winnerId ?? payload.playerId));
-      if (onTime && next.phase === 'victory' && soundPlayer) audio?.winner(soundPlayer.animal_id, Boolean(soundPlayer.second_chance));
-      else if (onTime && next.phase === 'secondChance' && soundPlayer) audio?.animal(soundPlayer.animal_id, true);
-      else if (onTime && next.sound) audio?.effect(next.sound);
+      if (onTime && next.phase === 'victory' && soundPlayer) playbackRef.current.audio?.winner(soundPlayer.animal_id, Boolean(soundPlayer.second_chance));
+      else if (onTime && next.phase === 'secondChance' && soundPlayer) playbackRef.current.audio?.animal(soundPlayer.animal_id, true);
+      else if (onTime && next.sound) playbackRef.current.audio?.effect(next.sound);
       // Even the podium is scheduled by the server. Waiting for local audio
       // playback to resolve would make each viewer reveal places at a different time.
       timer = setTimeout(pump, Math.max(0, next.startsAtMs + next.ms - Date.now()));
     };
     timer = setTimeout(pump, 0);
-    return () => { stopped = true; clearTimeout(timer); audio?.stop('effect'); audio?.stop('animal'); };
-  }, [queue, audio, movement, countdown, revision]);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [queue, revision]);
 
   useEffect(() => {
     if (!step || !['entrance','advance','bye'].includes(step.phase) || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -112,7 +115,9 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       const origin = step.phase === 'entrance' ? slots[0] : fighter ?? slots[0];
       if (!destination || !origin || !destination.animate) continue;
       const a = origin.getBoundingClientRect(), b = destination.getBoundingClientRect();
-      animations.push(destination.animate([{ transform:`translate(${a.x-b.x}px, ${a.y-b.y}px) scale(.75)`, opacity:.5 }, { transform:`translate(${a.x-b.x}px, 0) scale(.9)`, opacity:1, offset:.55 }, { transform:'translate(0,0) scale(1)', opacity:1 }], { duration:step.ms, easing:'ease-in-out' }));
+      const animation = destination.animate([{ transform:`translate(${a.x-b.x}px, ${a.y-b.y}px) scale(.75)`, opacity:.5 }, { transform:`translate(${a.x-b.x}px, 0) scale(.9)`, opacity:1, offset:.55 }, { transform:'translate(0,0) scale(1)', opacity:1 }], { duration:step.ms, easing:'ease-in-out' });
+      animation.currentTime = Math.min(step.ms, Math.max(0, Date.now() - step.startsAtMs));
+      animations.push(animation);
     }
     return () => animations.forEach(animation => animation.cancel());
   }, [step]);
@@ -130,7 +135,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
     <div className="cinema-move">{revealed ? <>{symbols[move]} <small>{u(move)}</small></> : ' '}</div>
   </div>;
   return <div className="cinematic-layout" ref={stageRef}>
-    <div className="card cinema-stage">
+    <div className="card cinema-stage" style={{ '--phase-duration': `${step?.ms ?? 0}ms` } as CSSProperties}>
       {step && ['advance','bye'].includes(step.phase) && <div className="cinema-transit"><span data-arrival={payload.playerId}>{mascot(payload.playerId)}</span><b>{player(payload.playerId)?.display_name}</b><span>{u(`cinema_${step.phase}`)}</span></div>}
       {champion ? <div className="cinema-champion"><h2>🏆 {player(champion)?.display_name}</h2><span className="cinema-mascot">{mascot(champion)}</span></div> : podium ? <div className="cinema-champion"><h2>🏆 {u('podium')}</h2><div className="official-podium">{[visibleState?.first_place ?? visibleState?.champion_id, visibleState?.second_place, visibleState?.third_place].map((id, index) => id && index < podiumPlaces && <section key={id} data-place={index + 1}><h3>{['🥇', '🥈', '🥉'][index]} {u(['firstPlace', 'secondPlace', 'thirdPlace'][index])}</h3><span className="cinema-mascot">{mascot(id)}</span><h2>{player(id)?.display_name}</h2></section>)}</div>{step?.phase === 'podium' || !step ? podiumControls : null}</div> : active ? <>
         {active.match_id?.endsWith(":third-place") && <h3>🥉 {u("thirdPlaceMatch")}</h3>}

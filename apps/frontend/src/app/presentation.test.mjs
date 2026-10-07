@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationQueue, eventSteps, scheduledSteps, duration, officialOutcomeClass, stateForPresentation } from './presentation.mjs';
+import { readFileSync } from 'node:fs';
+import { PresentationQueue, eventSteps, scheduledSteps, duration, officialOutcomeClass, presentationContextKey, serverClockOffset, stateForPresentation } from './presentation.mjs';
 import { AUDIO_ASSETS, AudioManager } from './audio-manager.mjs';
 
 const event = (sequence, eventType = 'round_resolved', stateVersion = sequence) => ({ eventId: `id-${sequence}`, sequence, eventType, payload: { stateVersion } });
@@ -167,4 +168,37 @@ test('every viewer uses the same authoritative phase times instead of arrival ti
   assert.deepEqual(early.slice(0, 3).map(step => step.startsAtMs), [10_000, 10_650, 11_300]);
   assert.equal(early.at(-1).startsAtMs, 12_600);
   assert.equal(scheduledSteps(event(13), 1, 1, 20_000)[0].startsAtMs, 20_000);
+});
+
+test('clock calibration removes half the HTTP round trip and stays stable across snapshots', () => {
+  assert.equal(serverClockOffset(10_000, 10_050, 10_150), 100);
+  assert.equal(serverClockOffset(10_000, 10_050, 10_550), 300);
+  assert.equal(serverClockOffset(10_000, 10_550, 10_050), null);
+  const snapshot = { run_id: 'run-1', state_version: 4, presentation_state: {}, presentation_events: [event(8), event(9)] };
+  assert.equal(presentationContextKey(snapshot), 'run-1:4:8:9');
+  assert.equal(presentationContextKey({ ...snapshot, presentation_server_time_ms: 11_000 }), 'run-1:4:8:9');
+  assert.equal(presentationContextKey({ ...snapshot, state_version: 5 }), 'run-1:5:8:9');
+});
+
+for (const movement of [.5, 1, 2, 4, 8]) for (const countdown of [.5, 1, 2, 4, 8]) {
+  test(`independent ${movement}x movement and ${countdown}x countdown keep phase durations ordered`, () => {
+    const start = 100_000;
+    const resolved = { ...event(1), payload: { clientPresentationAtMs: start } };
+    const steps = scheduledSteps(resolved, movement, countdown);
+    assert.deepEqual(steps.map(step => step.phase), ['countdown', 'countdown', 'countdown', 'reveal', 'result']);
+    for (let index = 0; index < steps.length - 1; index++) {
+      assert.equal(steps[index + 1].startsAtMs, steps[index].startsAtMs + steps[index].ms);
+    }
+    assert.equal(steps.at(-1).startsAtMs + steps.at(-1).ms - start, 1950 / countdown + 1150 / movement);
+  });
+}
+
+test('CSS and movement animations use the authoritative phase duration', () => {
+  const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+  const arena = readFileSync(new URL('./cinematic-arena.tsx', import.meta.url), 'utf8');
+  for (const selector of ['.cinema-countdown', '.victorious .cinema-mascot', '.heart-breaking span']) {
+    const rule = css.slice(css.indexOf(selector), css.indexOf('}', css.indexOf(selector)));
+    assert.match(rule, /animation-duration:min\([^,]+,var\(--phase-duration\)\)/);
+  }
+  assert.match(arena, /animation\.currentTime = Math\.min\(step\.ms, Math\.max\(0, Date\.now\(\) - step\.startsAtMs\)\)/);
 });

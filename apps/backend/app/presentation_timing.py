@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 
 
 OPENING_DELAY_SECONDS = 3
-DELIVERY_BUFFER_MS = 750
+DELIVERY_BUFFER_MS = 1200
+PER_EVENT_DELIVERY_BUDGET_MS = 300
 BETWEEN_ROUNDS_MS = 250
 
 
@@ -37,12 +38,18 @@ def schedule_events(
     minimum_delay_seconds: float = 1,
 ) -> tuple[list[tuple[str, dict[str, object]]], datetime]:
     """Stamp one transition with absolute UTC times shared by all spectators."""
-    at_ms = int(now.timestamp() * 1000) + DELIVERY_BUFFER_MS
+    now_ms = int(now.timestamp() * 1000)
+    at_ms = now_ms + DELIVERY_BUFFER_MS
     scheduled = []
-    for event_type, payload in events:
+    for index, (event_type, payload) in enumerate(events):
+        # The durable outbox publishes one event at a time. At 8x, visual
+        # phases can be shorter than one database/realtime round-trip; reserve
+        # enough lead time for each later event instead of stamping it in the
+        # past before it can even be delivered.
+        at_ms = max(at_ms, now_ms + DELIVERY_BUFFER_MS + index * PER_EVENT_DELIVERY_BUDGET_MS)
         scheduled.append((event_type, {**payload, "presentationAtMs": at_ms}))
         at_ms += round(event_duration_ms(event_type, movement, countdown))
     next_at = now + timedelta(milliseconds=max(
-        minimum_delay_seconds * 1000, at_ms - int(now.timestamp() * 1000) + BETWEEN_ROUNDS_MS,
+        minimum_delay_seconds * 1000, at_ms - now_ms + BETWEEN_ROUNDS_MS,
     ))
     return scheduled, next_at

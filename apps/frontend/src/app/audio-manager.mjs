@@ -24,7 +24,15 @@ export class AudioManager {
   // value also makes an animal click safe during the first client hydration;
   // configure(false, ...) immediately silences it for an official OFF setting.
   constructor(host) { this.host = host; this.channels = new Map(); this.waiters = new Map(); this.effects = true; this.music = false; this.celebrating = false; this.unlocked = false; }
-  unlock() { this.unlocked = true; return Boolean(this.host.Audio || this.host.document?.createElement); }
+  unlock() {
+    this.unlocked = true;
+    // An initial play() can be blocked by browser autoplay policy. Retry from
+    // the first trusted gesture, while that gesture is still being handled.
+    if (this.music && !this.celebrating && !this.channels.has('background')) {
+      this.play('background', AUDIO_ASSETS.background, { loop: true, volume: .24 });
+    }
+    return Boolean(this.host.Audio || this.host.document?.createElement);
+  }
   make(source, loop = false, volume = .5) {
     if (!this.host.Audio && !this.host.document?.createElement) return null;
     try {

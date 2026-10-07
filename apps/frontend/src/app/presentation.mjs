@@ -2,6 +2,17 @@
 export function duration(ms, speed = 1) {
   return ms / ([0.5, 1, 2, 4, 8].includes(Number(speed)) ? Number(speed) : 1);
 }
+// Use the HTTP round-trip midpoint instead of the response arrival instant.
+// It bounds network-latency error and keeps one clock anchor for the run.
+export function serverClockOffset(serverTimeMs, sentAtMs, receivedAtMs) {
+  if (![serverTimeMs, sentAtMs, receivedAtMs].every(Number.isFinite) || receivedAtMs < sentAtMs) return null;
+  return (sentAtMs + receivedAtMs) / 2 - serverTimeMs;
+}
+export function presentationContextKey(snapshot) {
+  const events = snapshot.presentation_events;
+  if (!snapshot.presentation_state || !events?.length) return null;
+  return `${snapshot.run_id ?? ''}:${snapshot.state_version ?? ''}:${events[0].sequence}:${events.at(-1).sequence}`;
+}
 // The bundled champion.mp3 is about seven seconds. Leave a short tail before
 // revealing the other places, using the same duration as the backend clock.
 export const CHAMPION_CUE_MS = 7500;

@@ -11,6 +11,7 @@ import asyncio
 import logging
 from hashlib import sha256
 from os import getenv
+from time import time
 from typing import Annotated
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -719,6 +720,9 @@ def create_app(
                 public["run_start_sequence"] = start_sequence
                 if presentation:
                     public.update(presentation)
+            # Available even before the first duel, so every viewer can
+            # calibrate its clock before the first realtime event arrives.
+            public["server_time_ms"] = int(time() * 1000)
             return public
         except StoreError as error:
             _raise_store_error(error)

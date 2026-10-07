@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import CinematicArena from "./cinematic-arena";
-import { PresentationQueue } from "./presentation.mjs";
+import { PresentationQueue, presentationContextKey, serverClockOffset } from "./presentation.mjs";
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
 import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
@@ -48,17 +48,10 @@ type PlaybackSpeed = "0.5" | "1" | "2" | "4" | "8";
 type OfficialPlayer = { player_id: string; display_name: string; animal_id: string };
 type OfficialRound = { number: number | null; entrant_ids: string[]; bye_player_id: string | null; matches: OfficialMatch[] };
 type OfficialMatch = { match_id: string | null; status: string | null; player_one_id: string | null; player_two_id: string | null; initial_hearts: number | null; player_one_hearts: number | null; player_two_hearts: number | null; winner_id: string | null; loser_id: string | null; rounds: Array<{ number: number | null; player_one_move: string | null; player_two_move: string | null; outcome: string | null }> };
-type OfficialState = { run_id?: string; run_start_sequence?: number; presentation_state?: OfficialState; presentation_events?: OfficialEvent[]; presentation_server_time_ms?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
+type OfficialState = { run_id?: string; run_start_sequence?: number; server_time_ms?: number; presentation_state?: OfficialState; presentation_events?: OfficialEvent[]; presentation_server_time_ms?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
 type OfficialEvent = { eventId: string; sequence: number; eventType: string; payload: unknown };
 const animalRushEmoji: Record<AnimalRushMove, string> = { rock: "✊", paper: "📄", scissors: "✂️" };
 const tournamentRealtimeScreens = new Set<Screen>(["waiting", "animal-rush", "animal-rush-result", "training-avatar", "training", "training-complete", "arena"]);
-const savedAudioPreference = (key: string, defaultValue = true) => {
-  if (typeof window === "undefined") return defaultValue;
-  try {
-    const savedValue = window.localStorage.getItem(key);
-    return savedValue === null ? defaultValue : savedValue !== "false";
-  } catch { return defaultValue; }
-};
 const resetTrainingChampionCue = (reference: { current: string | null }) => { reference.current = null; };
 const playbackSpeeds: ReadonlyArray<{ value: PlaybackSpeed; label: string }> = [
   { value: "0.5", label: "speed05" },
@@ -95,11 +88,10 @@ export default function HomePage() {
   // Tournament settings are an organizer-controlled upper bound. These two
   // settings are local to this browser, so a participant can always opt out
   // without changing the experience for anybody else.
-  // Keep the server and the first client render identical. Browser preferences
-  // are restored only after hydration, then persisted on subsequent changes.
+  // Every new visit starts with audio enabled. The player can still switch
+  // either channel off for the current visit without changing anyone else's.
   const [playerSoundEffectsEnabled, setPlayerSoundEffectsEnabled] = useState(true);
-  const [playerBackgroundMusicEnabled, setPlayerBackgroundMusicEnabled] = useState(false);
-  const [playerAudioPreferencesLoaded, setPlayerAudioPreferencesLoaded] = useState(false);
+  const [playerBackgroundMusicEnabled, setPlayerBackgroundMusicEnabled] = useState(true);
   const [organizerToken, setOrganizerToken] = useState("");
   const [playerToken, setPlayerToken] = useState("");
   const [tournamentId, setTournamentId] = useState("");
@@ -116,6 +108,7 @@ export default function HomePage() {
   const [hoveredGuestHearts, setHoveredGuestHearts] = useState(0);
   const [presentationQueue] = useState(() => new PresentationQueue());
   const [presentationRevision, setPresentationRevision] = useState(0);
+  const lastRestoredContextRef = useRef<string | null>(null);
   const [audio, setAudio] = useState<AudioManager | null>(null);
   const selectionAudioRef = useRef<HTMLAudioElement | null>(null);
   const effectiveSoundEffectsEnabled = soundEffectsEnabled && playerSoundEffectsEnabled;
@@ -128,23 +121,6 @@ export default function HomePage() {
     setRequestRateLimited(false);
     setRequestFailed(false);
   };
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setPlayerSoundEffectsEnabled(savedAudioPreference("rps-player-sound-effects", true));
-      // A new visitor starts with music muted. A later opt-in is remembered
-      // under this versioned key without inheriting the previous default.
-      setPlayerBackgroundMusicEnabled(savedAudioPreference("rps-player-background-music-v2", false));
-      setPlayerAudioPreferencesLoaded(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-  useEffect(() => {
-    if (!playerAudioPreferencesLoaded) return;
-    try {
-      window.localStorage.setItem("rps-player-sound-effects", String(playerSoundEffectsEnabled));
-      window.localStorage.setItem("rps-player-background-music-v2", String(playerBackgroundMusicEnabled));
-    } catch {}
-  }, [playerAudioPreferencesLoaded, playerSoundEffectsEnabled, playerBackgroundMusicEnabled]);
   useEffect(() => {
     const manager = new AudioManager(window);
     const timer = window.setTimeout(() => setAudio(manager), 0);
@@ -202,6 +178,7 @@ export default function HomePage() {
     manager.configure(soundEffectsEnabled && nextEffects, backgroundMusicEnabled && nextMusic);
   };
   const reconcilePresentation = useCallback((version: number) => {
+    lastRestoredContextRef.current = null;
     presentationQueue.reconcile(version);
     setPresentationRevision(current => current + 1);
   }, [presentationQueue]);
@@ -230,6 +207,7 @@ export default function HomePage() {
     const oldRun = lastOfficialStateRef.current?.run_id;
     if (state.run_id && state.run_id !== oldRun) {
       presentationQueue.reset();
+      lastRestoredContextRef.current = null;
       serverClockOffsetRef.current = null;
       audio?.resetRun();
       eventsRef.current = eventsRef.current.filter(event => (event.payload as { runId?: string })?.runId === state.run_id);
@@ -238,12 +216,16 @@ export default function HomePage() {
     }
     if (state.run_start_sequence) lastSequenceRef.current = Math.max(lastSequenceRef.current, state.run_start_sequence - 1);
   }, [audio, presentationQueue]);
-  const restorePresentation = useCallback((snapshot: OfficialState) => {
+  const restorePresentation = useCallback((snapshot: OfficialState, sentAtMs: number, receivedAtMs: number) => {
     if (!snapshot.presentation_state || !snapshot.presentation_events?.length || !snapshot.presentation_server_time_ms) return false;
+    const contextKey = presentationContextKey(snapshot);
+    if (contextKey === lastRestoredContextRef.current) return true;
     presentationQueue.reset();
     presentationQueue.reconcile((snapshot.state_version ?? 0) - 1);
-    const offset = Date.now() - snapshot.presentation_server_time_ms;
-    serverClockOffsetRef.current = offset;
+    if (serverClockOffsetRef.current === null) {
+      serverClockOffsetRef.current = serverClockOffset(snapshot.presentation_server_time_ms, sentAtMs, receivedAtMs);
+    }
+    const offset = serverClockOffsetRef.current ?? 0;
     for (const event of snapshot.presentation_events) {
       const payload = event.payload as Record<string, unknown>;
       const presentationAt = Number(payload.presentationAtMs);
@@ -257,6 +239,7 @@ export default function HomePage() {
     eventsRef.current = eventsRef.current.sort((a, b) => a.sequence - b.sequence).slice(-50);
     setOfficialEvents([...eventsRef.current]);
     sessionStorage.setItem(`rps-realtime-sequence:${tournamentId || code}`, String(lastSequenceRef.current));
+    lastRestoredContextRef.current = contextKey;
     setPresentationRevision(current => current + 1);
     return true;
   }, [presentationQueue, tournamentId, code]);
@@ -265,6 +248,7 @@ export default function HomePage() {
   const officialStartNoticeTimerRef = useRef<number | null>(null);
   useEffect(() => {
     presentationQueue.reset();
+    lastRestoredContextRef.current = null;
     serverClockOffsetRef.current = null;
     latestVersionRef.current = 0;
     lastOfficialStateRef.current = null;
@@ -407,20 +391,25 @@ export default function HomePage() {
     const refreshOfficial = async () => {
       const token = playerToken || organizerToken;
       try {
+        const sentAtMs = Date.now();
         const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (response.status === 409) return;
         if (!response.ok) throw new Error("official-state unavailable");
         const payload = await response.json() as OfficialState;
+        const receivedAtMs = Date.now();
         if (disposed) return;
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
+          if (serverClockOffsetRef.current === null && typeof payload.server_time_ms === "number") {
+            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs);
+          }
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
           setOfficialState(payload);
-          if (!restorePresentation(payload)) reconcilePresentation(version);
+          if (!restorePresentation(payload, sentAtMs, receivedAtMs)) reconcilePresentation(version);
           if (typeof payload.sound_effects_enabled === "boolean") setSoundEffectsEnabled(payload.sound_effects_enabled);
           if (typeof payload.background_music_enabled === "boolean") setBackgroundMusicEnabled(payload.background_music_enabled);
           if (payload.movement_speed) setMovementSpeed(payload.movement_speed);
@@ -454,20 +443,25 @@ export default function HomePage() {
     } catch { eventsRef.current = []; }
 
     const loadSnapshot = async () => {
+      const sentAtMs = Date.now();
       const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${accessToken}` } });
       if (response.status === 409) return null;
       if (!response.ok) throw new Error("official-state unavailable");
       const payload = await response.json() as OfficialState;
+      const receivedAtMs = Date.now();
       if (!disposed) {
         hasSynchronizedSnapshot = true;
         setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: true, websocketSubscribed }));
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
+          if (serverClockOffsetRef.current === null && typeof payload.server_time_ms === "number") {
+            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs);
+          }
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
           setOfficialState(payload);
-          if (!restorePresentation(payload)) reconcilePresentation(version);
+          if (!restorePresentation(payload, sentAtMs, receivedAtMs)) reconcilePresentation(version);
           if (typeof payload.sound_effects_enabled === "boolean") setSoundEffectsEnabled(payload.sound_effects_enabled);
           if (typeof payload.background_music_enabled === "boolean") setBackgroundMusicEnabled(payload.background_music_enabled);
           if (payload.movement_speed) setMovementSpeed(payload.movement_speed);
@@ -525,7 +519,7 @@ export default function HomePage() {
             const serverTime = Number(frame.serverTimeMs);
             if (Number.isFinite(serverTime) && serverTime > 0) {
               const measuredOffset = Date.now() - serverTime;
-              serverClockOffsetRef.current = serverClockOffsetRef.current === null ? measuredOffset : Math.min(serverClockOffsetRef.current, measuredOffset);
+              if (serverClockOffsetRef.current === null) serverClockOffsetRef.current = measuredOffset;
             }
             const presentationAt = Number((frame.payload as Record<string, unknown>)?.presentationAtMs);
             const visualEvent = { eventId: frame.eventId, sequence, eventType: frame.eventType, payload: {
@@ -548,7 +542,9 @@ export default function HomePage() {
           }
           if (frame.eventType === "tournament_started") { interruptForOfficialStart(); void loadSnapshot().catch(() => setRealtimeStatus("fallback")); }
         };
-        socket.onclose = () => { websocketSubscribed = false; presentationQueue.clear(); audio?.stop("arena"); scheduleReconnect(); };
+        // Already scheduled official events remain valid during a short socket
+        // outage; the next snapshot will reconcile only if the state changed.
+        socket.onclose = () => { websocketSubscribed = false; scheduleReconnect(); };
         socket.onerror = () => socket?.close();
       } catch { void loadSnapshot().catch(() => undefined); scheduleReconnect(); }
     };

@@ -102,6 +102,8 @@ servidor espera 3 segundos após o Start antes de resolver a primeira jogada.
 Os eventos oficiais incluem horários de apresentação definidos no backend,
 para que telas conectadas mostrem cada fase do duelo no mesmo instante, mesmo
 quando recebem os eventos com latências diferentes.
+Veja [sincronização da apresentação](docs/presentation-sync.md) para o contrato
+de relógio, velocidades e reconexão.
 
 A capacidade da sala representa apenas o número máximo de jogadores.
 
@@ -150,6 +152,12 @@ O sistema prevê:
 - efeito de coração quebrado;
 - som do animal quando ele vence o confronto;
 - música de fundo opcional.
+
+Cada nova visita inicia com música de fundo e efeitos sonoros ligados no
+navegador do jogador. Os controles permitem desligá-los durante a visita.
+Quando o navegador bloqueia reprodução automática com áudio, a música começa
+na primeira interação com a página; não é possível obrigar o navegador a
+reproduzi-la antes disso.
 
 ## Idiomas
 
