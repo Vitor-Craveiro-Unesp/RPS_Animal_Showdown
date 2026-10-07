@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { scheduledSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
+import { officialOutcomeClass, scheduledSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
 import { AudioManager } from "./audio-manager.mjs";
 
 // Public DTOs only: this component never submits a competitive mutation.
@@ -59,7 +59,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       const onTime = next.ms === 0 || Date.now() < next.startsAtMs + next.ms;
       if (onTime) setStep(next);
       const payload = next.event.payload ?? {};
-      const eventState = payload.state ?? stateRef.current;
+      const eventState = payload.state ?? roundTransitionRef.current?.after ?? stateRef.current;
       if (next.event.eventType === 'round_resolved' && next.phase === 'countdown' && next.number === 3) {
         roundTransitionRef.current = { before: payload.previousState ?? null, after: payload.state ?? null, matchId: payload.matchId ?? null };
       }
@@ -81,7 +81,8 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       const previousRounds: Round[] = before ? [...before.completed_rounds, ...(before.current_round ? [before.current_round] : [])] : [];
       const previousMatch = previousRounds.flatMap(round => round.matches).find(item => item.match_id === payload.matchId);
       if (next.phase === 'entrance' && officialMatch) setMatch({ ...officialMatch, player_one_hearts: officialMatch.initial_hearts, player_two_hearts: officialMatch.initial_hearts });
-      if (next.phase === 'heart' || next.phase === 'elimination') setMatch(current => current ? { ...current, ...(payload.playerId === current.player_one_id ? { player_one_hearts: payload.heartsRemaining ?? 0 } : { player_two_hearts: payload.heartsRemaining ?? 0 }) } : officialMatch ?? null);
+      if (next.phase === 'heart') setMatch(current => current ? { ...current, ...(payload.playerId === current.player_one_id ? { player_one_hearts: payload.heartsRemaining ?? 0 } : { player_two_hearts: payload.heartsRemaining ?? 0 }) } : officialMatch ?? null);
+      if ((next.phase === 'elimination' || next.phase === 'victory') && officialMatch) setMatch(officialMatch);
       if (next.phase === 'countdown') setMatch(current => current?.match_id === payload.matchId ? current : previousMatch ?? officialMatch ?? null);
       const eventPlayers = eventState?.players ?? stateRef.current?.players ?? [];
       const soundPlayer = eventPlayers.find((item: Player) => item.player_id === (payload.winnerId ?? payload.playerId));
@@ -123,7 +124,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
   const podiumPlaces = step?.phase === 'podium_second' ? 2 : 3;
   const revealed = step && ['reveal','result'].includes(step.phase);
   const symbols: Record<string,string> = { rock:'✊', paper:'📄', scissors:'✂️' };
-  const fighter = (id: string | null, lives: number | null, move: string) => <div className={`cinema-fighter ${step?.phase === 'elimination' && payload.playerId === id ? 'eliminated' : ''} ${step?.phase === 'victory' && payload.winnerId === id ? 'victorious' : ''}`}>
+  const fighter = (id: string | null, lives: number | null, move: string) => <div className={`cinema-fighter ${officialOutcomeClass(active, id)}`}>
     <span className="cinema-mascot" data-fighter={id} title={player(id)?.second_chance ? `${u('zombie')} · ${u('secondChanceReturn')}` : undefined}>{mascot(id)}</span><b>{player(id)?.display_name}</b>
     <div className={`cinema-hearts ${step?.phase === 'heart' && payload.playerId === id ? 'heart-breaking' : ''}`} aria-label={`${u('heartsCount')}: ${lives ?? 0}`}>{'❤️'.repeat(Math.max(0,lives ?? 0))}{step?.phase === 'heart' && payload.playerId === id && <span>💔</span>}</div>
     <div className="cinema-move">{revealed ? <>{symbols[move]} <small>{u(move)}</small></> : ' '}</div>
@@ -140,7 +141,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
         <p className="cinema-caption" aria-live="polite">{step?.phase === 'result' ? payload.outcome === 'tie' ? u('cinemaTie') : `${u('cinemaRoundWinner')}: ${player(payload.lostHeartPlayerId === active.player_one_id ? active.player_two_id : active.player_one_id)?.display_name ?? ''}` : step ? u(`cinema_${step.phase}`) : u('status_pending')}</p>
       </> : <p>{u('status_pending')}</p>}
     </div>
-<div className="card cinema-bracket"><h3>{u('cinemaBracket')}</h3><div className="cinema-rounds">{allRounds.map(round => <section key={round.number}><h4>{u('officialRound')} {round.number}</h4>{round.entrant_ids.length === 4 && <p>{u("semifinals")}</p>}{round.matches.map(item => <div className="bracket-match" key={item.match_id}>{item.match_id?.endsWith(":second-chance") && <h4>🧟 {u("secondChance")}</h4>}{item.match_id?.endsWith(":third-place") ? <h4>🥉 {u("thirdPlaceMatch")}</h4> : round.entrant_ids.length === 2 ? <h4>🏆 {u("grandFinal")}</h4> : null}{[item.player_one_id,item.player_two_id].map(id => <div key={id} className={`bracket-slot ${item.loser_id === id ? 'eliminated' : ''}`}><span data-slot={id} data-second-chance={player(id)?.second_chance || undefined}>{mascot(id)}</span><span>{player(id)?.display_name}</span>{item.loser_id === id ? '💀' : item.winner_id === id ? '✓' : ''}</div>)}</div>)}{round.waiting_player_id && <p>{mascot(round.waiting_player_id)} {player(round.waiting_player_id)?.display_name} · {u("secondChanceWaiting")}</p>}{round.bye_player_id && <div className="bracket-slot"><span data-slot={round.bye_player_id}>{mascot(round.bye_player_id)}</span>{player(round.bye_player_id)?.display_name} · {u('bye')}</div>}</section>)}</div></div>
+<div className="card cinema-bracket"><h3>{u('cinemaBracket')}</h3><div className="cinema-rounds">{allRounds.map(round => <section key={round.number}><h4>{u('officialRound')} {round.number}</h4>{round.entrant_ids.length === 4 && <p>{u("semifinals")}</p>}{round.matches.map(item => <div className="bracket-match" key={item.match_id}>{item.match_id?.endsWith(":second-chance") && <h4>🧟 {u("secondChance")}</h4>}{item.match_id?.endsWith(":third-place") ? <h4>🥉 {u("thirdPlaceMatch")}</h4> : round.entrant_ids.length === 2 ? <h4>🏆 {u("grandFinal")}</h4> : null}{[item.player_one_id,item.player_two_id].map(id => <div key={id} className={`bracket-slot ${officialOutcomeClass(item, id)}`}><span data-slot={id} data-second-chance={player(id)?.second_chance || undefined}>{mascot(id)}</span><span>{player(id)?.display_name}</span>{item.loser_id === id ? '💀' : item.winner_id === id ? '✓' : ''}</div>)}</div>)}{round.waiting_player_id && <p>{mascot(round.waiting_player_id)} {player(round.waiting_player_id)?.display_name} · {u("secondChanceWaiting")}</p>}{round.bye_player_id && <div className="bracket-slot"><span data-slot={round.bye_player_id}>{mascot(round.bye_player_id)}</span>{player(round.bye_player_id)?.display_name} · {u('bye')}</div>}</section>)}</div></div>
     <div className="card cinema-events"><h3>{u('cinemaEvents')}</h3><p>{u('realtime')}: {u(realtime)}</p>{events.filter(event => event.sequence <= visibleSequence && (event.eventType !== 'podium_decided' || podiumPresented)).map(event => <p className="event" key={event.eventId} data-event-id={event.eventId}>#{event.sequence} · {u(`event_${event.eventType}`)} {mascot(event.payload?.playerId ?? event.payload?.winnerId ?? event.payload?.playerOneId)} {player(event.payload?.playerId ?? event.payload?.winnerId ?? event.payload?.playerOneId)?.display_name}{event.payload?.playerTwoId && <> {u("versus")} {mascot(event.payload.playerTwoId)} {player(event.payload.playerTwoId)?.display_name}</>}</p>)}</div>
   </div>;
 }

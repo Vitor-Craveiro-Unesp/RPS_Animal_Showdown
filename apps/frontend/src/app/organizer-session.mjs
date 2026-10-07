@@ -18,7 +18,11 @@ export function restoreTournamentSession(storage) {
   };
 }
 
-export function saveOrganizerSession(storage, { code, tournamentId, organizerToken }) {
+export function saveOrganizerSession(storage, { code, tournamentId, organizerToken, previousTournamentId = "" }) {
+  if (previousTournamentId && previousTournamentId !== tournamentId) {
+    storage.removeItem(`rps-realtime-sequence:${previousTournamentId}`);
+    storage.removeItem(`rps-realtime-events:${previousTournamentId}`);
+  }
   storage.setItem(keys.code, code);
   storage.setItem(keys.tournamentId, tournamentId);
   storage.setItem(keys.organizer, organizerToken);
@@ -36,4 +40,8 @@ export function saveTournamentView(storage, { screen, code, tournamentId }) {
   storage.setItem(keys.screen, screen);
   storage.setItem(keys.code, code);
   storage.setItem(keys.tournamentId, tournamentId);
+}
+
+export function hasCurrentTournamentArena(officialState, tournamentId) {
+  return Boolean(tournamentId && officialState?.tournament_id === tournamentId);
 }

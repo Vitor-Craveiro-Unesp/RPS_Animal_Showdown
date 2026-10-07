@@ -41,6 +41,15 @@ export function scheduledSteps(event, movement = 1, countdown = 1, now = Date.no
   });
 }
 
+// Visual treatment comes only from the official match outcome, never from a
+// locally inferred heart count or the player's browser.
+export function officialOutcomeClass(match, playerId) {
+  if (!match || !playerId) return '';
+  if (match.loser_id === playerId) return 'eliminated';
+  if (match.winner_id === playerId) return 'victorious';
+  return '';
+}
+
 // These are server snapshots. The presentation only controls when each part of
 // an already-authoritative transition becomes visible to the audience.
 export function stateForPresentation(previous, next, phase, matchId) {

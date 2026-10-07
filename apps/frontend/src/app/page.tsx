@@ -8,7 +8,7 @@ import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
 import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
 import { participantStatusCounts } from "./participant-status.mjs";
-import { restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
+import { hasCurrentTournamentArena, restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { animalName, animalShowcaseRows, Locale, localeNames, locales, regionName, scientificName, text, uiText } from "../i18n/catalog";
 import { animalRushRoundDuration, randomAnimalRushMove, resolveAnimalRushAnswer, winningAnimalRushMove } from "./animal-rush.mjs";
 
@@ -370,15 +370,18 @@ export default function HomePage() {
 
   useEffect(() => {
     if (screen !== "organizer" || !code || !organizerToken) return;
+    let disposed = false;
     const loadParticipants = async () => {
       const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/admin/participants`, { headers: { Authorization: `Bearer ${organizerToken}` } });
+      if (disposed) return;
       if (!response.ok) return reportRequestFailure(response);
       const payload = await response.json();
+      if (disposed) return;
       setParticipants(Array.isArray(payload.participants) ? payload.participants : []);
     };
     void loadParticipants();
     const timer = window.setInterval(() => void loadParticipants(), 10_000);
-    return () => window.clearInterval(timer);
+    return () => { disposed = true; window.clearInterval(timer); };
   }, [code, organizerToken, screen]);
 
   useEffect(() => {
@@ -573,8 +576,25 @@ export default function HomePage() {
         return;
       }
       clearRequestFailure();
-      tournamentStartedRef.current = false;
       const tournament = await response.json();
+      // A new room must not inherit the previous room's finished arena,
+      // participants, presentation queue or replay version barrier.
+      presentationQueue.reset();
+      setPresentationRevision(current => current + 1);
+      setOfficialState(null);
+      setOfficialEvents([]);
+      setParticipants([]);
+      eventsRef.current = [];
+      lastOfficialStateRef.current = null;
+      latestVersionRef.current = 0;
+      lastSequenceRef.current = 0;
+      serverClockOffsetRef.current = null;
+      setRealtimeStatus("connecting");
+      setOfficialStartNotice(false);
+      if (officialStartNoticeTimerRef.current !== null) window.clearTimeout(officialStartNoticeTimerRef.current);
+      officialStartNoticeTimerRef.current = null;
+      tournamentStartedRef.current = false;
+      audio?.resetRun();
       setCode(tournament.tournament_code);
       setTournamentId(tournament.tournament_id);
       setOrganizerToken(tournament.organizer_access_token);
@@ -584,6 +604,7 @@ export default function HomePage() {
         code: tournament.tournament_code,
         tournamentId: tournament.tournament_id,
         organizerToken: tournament.organizer_access_token,
+        previousTournamentId: tournamentId,
       });
       setScreen("organizer");
     } catch {
@@ -858,7 +879,7 @@ export default function HomePage() {
       </div>
     </section>}
 
-    {screen === "join" && <section>
+    {screen === "join" && <section className="join-page">
       <h1 className="view-title">{t("joinTitle")}</h1>
       <div className="panel">
         <label className="field">{t("code")}<input value={code} onChange={(event) => { setCode(event.target.value); setPlayerToken(""); tournamentStartedRef.current = false; sessionStorage.removeItem("rps-player"); }} /></label>
@@ -955,9 +976,9 @@ export default function HomePage() {
       <div className="panel training-complete"><div className="training-champion">{trainingState?.winner === "manual_player" ? trainingAvatar?.emoji ?? "🙂" : animal.emoji}</div><h2>{u("trainingChampion")}</h2><p>{trainingState?.winner === "manual_player" ? u("trainingYou") : selectedAnimalName}</p><p className="muted">{trainingAvatar?.emoji ?? "🙂"} {u("versus")} {animal.emoji} · {hearts(trainingState?.manual_hearts)} {u("versus")} {hearts(trainingState?.character_hearts)}</p><button className="button" onClick={returnToWaiting}>{guestTraining ? u("returnAnimalSelection") : u("returnWaiting")}</button></div>
     </section>}
 
-    {screen === "organizer" && <section>
+    {screen === "organizer" && <section className="organizer-page">
       <h1 className="view-title">{t("organizer")}</h1>
-<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="organizer-status-groups"><div><b>{u("participantStatus_configuring_strategy")}</b><strong>{participantCounts.configuring}</strong></div><div><b>{u("participantStatus_ready")}</b><strong>{participantCounts.ready}</strong></div></div><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{officialState ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participantCounts.ready < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
+<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="organizer-status-groups"><div><b>{u("participantStatus_configuring_strategy")}</b><strong>{participantCounts.configuring}</strong></div><div><b>{u("participantStatus_ready")}</b><strong>{participantCounts.ready}</strong></div></div><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{hasCurrentTournamentArena(officialState, tournamentId) ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participantCounts.ready < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
     </section>}
 
     {screen === "arena" && <section>

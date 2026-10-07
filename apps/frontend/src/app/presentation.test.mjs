@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationQueue, eventSteps, scheduledSteps, duration, stateForPresentation } from './presentation.mjs';
+import { PresentationQueue, eventSteps, scheduledSteps, duration, officialOutcomeClass, stateForPresentation } from './presentation.mjs';
 import { AUDIO_ASSETS, AudioManager } from './audio-manager.mjs';
 
 const event = (sequence, eventType = 'round_resolved', stateVersion = sequence) => ({ eventId: `id-${sequence}`, sequence, eventType, payload: { stateVersion } });
+
+test('only the official resolved match dims the loser and highlights the winner', () => {
+  const pending = { player_one_hearts: 0, winner_id: null, loser_id: null };
+  assert.equal(officialOutcomeClass(pending, 'p1'), '');
+  const resolved = { ...pending, winner_id: 'p2', loser_id: 'p1' };
+  assert.equal(officialOutcomeClass(resolved, 'p1'), 'eliminated');
+  assert.equal(officialOutcomeClass(resolved, 'p2'), 'victorious');
+  assert.equal(officialOutcomeClass(resolved, null), '');
+});
 
 function host() {
   const created = [], spoken = [];
