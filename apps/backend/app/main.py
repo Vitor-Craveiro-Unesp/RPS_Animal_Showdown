@@ -708,7 +708,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="Official tournament state is not available.")
         try:
             if isinstance(tournament_store, PostgresTournamentStore):
-                snapshot, state_version, start_sequence = tournament_store.official_state_snapshot_for(tournament)
+                snapshot, state_version, start_sequence, presentation = tournament_store.official_state_snapshot_for(tournament)
             else:
                 snapshot = tournament.official_state_snapshot
                 state_version = None
@@ -717,6 +717,8 @@ def create_app(
             public = official_state_view(tournament, snapshot, state_version=state_version)
             if isinstance(tournament_store, PostgresTournamentStore):
                 public["run_start_sequence"] = start_sequence
+                if presentation:
+                    public.update(presentation)
             return public
         except StoreError as error:
             _raise_store_error(error)

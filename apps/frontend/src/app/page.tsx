@@ -7,6 +7,7 @@ import { PresentationQueue } from "./presentation.mjs";
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
 import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
+import { participantStatusCounts } from "./participant-status.mjs";
 import { restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { animalName, animalShowcaseRows, Locale, localeNames, locales, regionName, scientificName, text, uiText } from "../i18n/catalog";
 import { animalRushRoundDuration, randomAnimalRushMove, resolveAnimalRushAnswer, winningAnimalRushMove } from "./animal-rush.mjs";
@@ -46,7 +47,7 @@ type PlaybackSpeed = "0.5" | "1" | "2" | "4" | "8";
 type OfficialPlayer = { player_id: string; display_name: string; animal_id: string };
 type OfficialRound = { number: number | null; entrant_ids: string[]; bye_player_id: string | null; matches: OfficialMatch[] };
 type OfficialMatch = { match_id: string | null; status: string | null; player_one_id: string | null; player_two_id: string | null; initial_hearts: number | null; player_one_hearts: number | null; player_two_hearts: number | null; winner_id: string | null; loser_id: string | null; rounds: Array<{ number: number | null; player_one_move: string | null; player_two_move: string | null; outcome: string | null }> };
-type OfficialState = { run_id?: string; run_start_sequence?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
+type OfficialState = { run_id?: string; run_start_sequence?: number; presentation_state?: OfficialState; presentation_events?: OfficialEvent[]; presentation_server_time_ms?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
 type OfficialEvent = { eventId: string; sequence: number; eventType: string; payload: unknown };
 const animalRushEmoji: Record<AnimalRushMove, string> = { rock: "✊", paper: "📄", scissors: "✂️" };
 const tournamentRealtimeScreens = new Set<Screen>(["waiting", "animal-rush", "animal-rush-result", "training-avatar", "training", "training-complete", "arena"]);
@@ -104,6 +105,7 @@ export default function HomePage() {
   const [createBusy, setCreateBusy] = useState(false);
   const [sessionRestored, setSessionRestored] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const participantCounts = participantStatusCounts(participants);
   const [requestFailed, setRequestFailed] = useState(false);
   const [requestRateLimited, setRequestRateLimited] = useState(false);
   const [trainingState, setTrainingState] = useState<TrainingState | null>(null);
@@ -217,13 +219,17 @@ export default function HomePage() {
   const eventsRef = useRef<OfficialEvent[]>([]);
   const latestVersionRef = useRef(0);
   const lastOfficialStateRef = useRef<OfficialState | null>(null);
+  const serverClockOffsetRef = useRef<number | null>(null);
   const readyBusyRef = useRef(false);
   const [readyBusy, setReadyBusy] = useState(false);
+  const joinBusyRef = useRef(false);
+  const [joinBusy, setJoinBusy] = useState(false);
   const trainingChampionCueRef = useRef<string | null>(null);
   const synchronizeRun = useCallback((state: OfficialState) => {
     const oldRun = lastOfficialStateRef.current?.run_id;
     if (state.run_id && state.run_id !== oldRun) {
       presentationQueue.reset();
+      serverClockOffsetRef.current = null;
       audio?.resetRun();
       eventsRef.current = eventsRef.current.filter(event => (event.payload as { runId?: string })?.runId === state.run_id);
       setOfficialEvents(eventsRef.current);
@@ -231,11 +237,34 @@ export default function HomePage() {
     }
     if (state.run_start_sequence) lastSequenceRef.current = Math.max(lastSequenceRef.current, state.run_start_sequence - 1);
   }, [audio, presentationQueue]);
+  const restorePresentation = useCallback((snapshot: OfficialState) => {
+    if (!snapshot.presentation_state || !snapshot.presentation_events?.length || !snapshot.presentation_server_time_ms) return false;
+    presentationQueue.reset();
+    presentationQueue.reconcile((snapshot.state_version ?? 0) - 1);
+    const offset = Date.now() - snapshot.presentation_server_time_ms;
+    serverClockOffsetRef.current = offset;
+    for (const event of snapshot.presentation_events) {
+      const payload = event.payload as Record<string, unknown>;
+      const presentationAt = Number(payload.presentationAtMs);
+      presentationQueue.accept({ ...event, payload: {
+        ...payload,
+        ...(Number.isFinite(presentationAt) && presentationAt > 0 ? { clientPresentationAtMs: presentationAt + offset } : {}),
+      } });
+      if (!eventsRef.current.some(item => item.eventId === event.eventId)) eventsRef.current.push(event);
+      lastSequenceRef.current = Math.max(lastSequenceRef.current, event.sequence);
+    }
+    eventsRef.current = eventsRef.current.sort((a, b) => a.sequence - b.sequence).slice(-50);
+    setOfficialEvents([...eventsRef.current]);
+    sessionStorage.setItem(`rps-realtime-sequence:${tournamentId || code}`, String(lastSequenceRef.current));
+    setPresentationRevision(current => current + 1);
+    return true;
+  }, [presentationQueue, tournamentId, code]);
   const tournamentStartedRef = useRef(false);
   const animalRushTimerRef = useRef<number | null>(null);
   const officialStartNoticeTimerRef = useRef<number | null>(null);
   useEffect(() => {
     presentationQueue.reset();
+    serverClockOffsetRef.current = null;
     latestVersionRef.current = 0;
     lastOfficialStateRef.current = null;
   }, [presentationQueue, tournamentId]);
@@ -297,6 +326,20 @@ export default function HomePage() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    if (!sessionRestored || !playerToken || !code) return;
+    let disposed = false;
+    void fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me`, {
+      headers: { Authorization: `Bearer ${playerToken}` },
+    }).then(response => response.ok ? response.json() : null).then(payload => {
+      if (disposed || !payload?.player) return;
+      setName(payload.player.display_name);
+      const selected = animals.find(item => item.id === payload.player.animal_id);
+      if (selected) setAnimal(selected);
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, [sessionRestored, playerToken, code]);
 
   useEffect(() => {
     if (!sessionRestored) return;
@@ -373,7 +416,7 @@ export default function HomePage() {
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
           setOfficialState(payload);
-          reconcilePresentation(version);
+          if (!restorePresentation(payload)) reconcilePresentation(version);
           if (typeof payload.sound_effects_enabled === "boolean") setSoundEffectsEnabled(payload.sound_effects_enabled);
           if (typeof payload.background_music_enabled === "boolean") setBackgroundMusicEnabled(payload.background_music_enabled);
           if (payload.movement_speed) setMovementSpeed(payload.movement_speed);
@@ -386,7 +429,7 @@ export default function HomePage() {
     void refreshOfficial();
     const timer = window.setInterval(() => void refreshOfficial(), 15_000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [code, interruptForOfficialStart, organizerToken, playerToken, realtimeEligible, realtimeStatus, reconcilePresentation, synchronizeRun]);
+  }, [code, interruptForOfficialStart, organizerToken, playerToken, realtimeEligible, realtimeStatus, reconcilePresentation, restorePresentation, synchronizeRun]);
 
   useEffect(() => {
     if (!sessionRestored || !realtimeEligible || !code || !(organizerToken || playerToken)) return;
@@ -420,7 +463,7 @@ export default function HomePage() {
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
           setOfficialState(payload);
-          reconcilePresentation(version);
+          if (!restorePresentation(payload)) reconcilePresentation(version);
           if (typeof payload.sound_effects_enabled === "boolean") setSoundEffectsEnabled(payload.sound_effects_enabled);
           if (typeof payload.background_music_enabled === "boolean") setBackgroundMusicEnabled(payload.background_music_enabled);
           if (payload.movement_speed) setMovementSpeed(payload.movement_speed);
@@ -475,7 +518,17 @@ export default function HomePage() {
           if (incoming?.runId && lastOfficialStateRef.current?.run_id !== incoming.runId && (incoming.stateVersion ?? 0) < latestVersionRef.current) return;
           if (incoming?.state && (incoming.state.state_version ?? 0) >= latestVersionRef.current) synchronizeRun(incoming.state);
           if (!eventsRef.current.some((event) => event.eventId === frame.eventId)) {
-            const visualEvent = { eventId: frame.eventId, sequence, eventType: frame.eventType, payload: { ...(frame.payload as Record<string, unknown>), previousState: lastOfficialStateRef.current } };
+            const serverTime = Number(frame.serverTimeMs);
+            if (Number.isFinite(serverTime) && serverTime > 0) {
+              const measuredOffset = Date.now() - serverTime;
+              serverClockOffsetRef.current = serverClockOffsetRef.current === null ? measuredOffset : Math.min(serverClockOffsetRef.current, measuredOffset);
+            }
+            const presentationAt = Number((frame.payload as Record<string, unknown>)?.presentationAtMs);
+            const visualEvent = { eventId: frame.eventId, sequence, eventType: frame.eventType, payload: {
+              ...(frame.payload as Record<string, unknown>), previousState: (frame.payload as Record<string, unknown>)?.previousState ?? lastOfficialStateRef.current,
+              ...(Number.isFinite(presentationAt) && presentationAt > 0 && serverClockOffsetRef.current !== null
+                ? { clientPresentationAtMs: presentationAt + serverClockOffsetRef.current } : {}),
+            } };
             presentationQueue.accept(visualEvent);
             eventsRef.current = [...eventsRef.current, { eventId: frame.eventId, sequence, eventType: frame.eventType, payload: frame.payload }].slice(-50);
             sessionStorage.setItem(eventsKey, JSON.stringify(eventsRef.current));
@@ -497,7 +550,7 @@ export default function HomePage() {
     };
     void connect();
     return () => { disposed = true; if (retryTimer) window.clearTimeout(retryTimer); socket?.close(); };
-  }, [code, interruptForOfficialStart, organizerToken, playerToken, realtimeEligible, sessionRestored, tournamentId, reconcilePresentation, audio, presentationQueue, synchronizeRun]);
+  }, [code, interruptForOfficialStart, organizerToken, playerToken, realtimeEligible, sessionRestored, tournamentId, reconcilePresentation, restorePresentation, audio, presentationQueue, synchronizeRun]);
 
   async function createTournament() {
     if (createBusy) return;
@@ -540,30 +593,50 @@ export default function HomePage() {
     }
   }
 
+  async function ensureJoinedPlayer(): Promise<string | null> {
+    if (playerToken) return playerToken;
+    const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
+    if (!joined.ok) { reportRequestFailure(joined); return null; }
+    const payload = await joined.json();
+    const capability = payload.player_access_token as string;
+    setTournamentId(payload.tournament_id);
+    if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
+    if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
+    if (typeof payload.countdown_speed === "string") setCountdownSpeed(payload.countdown_speed as PlaybackSpeed);
+    setPlayerToken(capability);
+    setOrganizerToken("");
+    saveParticipantSession(sessionStorage, { code: payload.tournament_code, tournamentId: payload.tournament_id, playerToken: capability });
+    return capability;
+  }
+
+  async function enterStrategy() {
+    if (!code.trim() || !name.trim()) return reportRequestFailure();
+    if (joinBusyRef.current) return;
+    joinBusyRef.current = true;
+    setJoinBusy(true);
+    try {
+      const capability = await ensureJoinedPlayer();
+      if (!capability) return;
+      // A saved draft is not READY. It only makes the editing stage visible to
+      // the organizer; the final strategy is replaced on confirmation.
+      const draft = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, {
+        method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${capability}` }, body: JSON.stringify(strategy),
+      });
+      if (!draft.ok) return reportRequestFailure(draft);
+      clearRequestFailure();
+      setScreen("strategy");
+    } catch { reportRequestFailure(); }
+    finally { joinBusyRef.current = false; setJoinBusy(false); }
+  }
+
   async function readyForTournament() {
-    if (!code.trim() || !name.trim() || !validStrategy) return reportRequestFailure();
+    if (!code.trim() || (!playerToken && !name.trim()) || !validStrategy) return reportRequestFailure();
     if (readyBusyRef.current) return;
     readyBusyRef.current = true;
     setReadyBusy(true);
     try {
-      let capability = playerToken;
-      if (!capability) {
-        const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
-        if (!joined.ok) return reportRequestFailure(joined);
-        const payload = await joined.json();
-        capability = payload.player_access_token;
-        setTournamentId(payload.tournament_id);
-        if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
-        if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
-        if (typeof payload.countdown_speed === "string") setCountdownSpeed(payload.countdown_speed as PlaybackSpeed);
-        setPlayerToken(capability);
-        setOrganizerToken("");
-        saveParticipantSession(sessionStorage, {
-          code: payload.tournament_code,
-          tournamentId: payload.tournament_id,
-          playerToken: capability,
-        });
-      }
+      const capability = await ensureJoinedPlayer();
+      if (!capability) return;
       const headers = { "Content-Type": "application/json", Authorization: `Bearer ${capability}` };
       const strategyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, { method: "PUT", headers, body: JSON.stringify(strategy) });
       if (!strategyResponse.ok) return reportRequestFailure(strategyResponse);
@@ -789,15 +862,16 @@ export default function HomePage() {
       <h1 className="view-title">{t("joinTitle")}</h1>
       <div className="panel">
         <label className="field">{t("code")}<input value={code} onChange={(event) => { setCode(event.target.value); setPlayerToken(""); tournamentStartedRef.current = false; sessionStorage.removeItem("rps-player"); }} /></label>
-        <label className="field">{t("name")}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label className="field">{t("name")}<input value={name} disabled={Boolean(playerToken)} onChange={(event) => setName(event.target.value)} /></label>
         <div className="map-toolbar"><span>{u("mapHint")}</span><button type="button" className="map-zoom" onClick={() => setMapZoomed((current) => !current)}>{u(mapZoomed ? "mapReduce" : "mapEnlarge")}</button></div>
         <div className="world-viewport" role="region" aria-label={u("worldMap")} tabIndex={0}>
           <div className={`world ${mapZoomed ? "zoomed" : ""}`}>
             <Image className="world-base" src={`/maps/world-map-countries-${locale}.svg`} alt="" aria-hidden="true" width={1000} height={485} unoptimized />
-            {animals.map((item) => <button key={item.id} type="button" style={{ left: `${item.x / 10}%`, top: `${item.y / 4.85}%` }} className={`animal-pin ${animal.id === item.id ? "selected" : ""}`} onClick={() => chooseAnimal(item)} aria-label={`${animalName(locale, item.id)} — ${regionName(locale, item.country)} — ${u(item.continent)}`} title={animalName(locale, item.id)}>{item.emoji}</button>)}
+            {animals.map((item) => <button key={item.id} type="button" disabled={Boolean(playerToken)} style={{ left: `${item.x / 10}%`, top: `${item.y / 4.85}%` }} className={`animal-pin ${animal.id === item.id ? "selected" : ""}`} onClick={() => chooseAnimal(item)} aria-label={`${animalName(locale, item.id)} — ${regionName(locale, item.country)} — ${u(item.continent)}`} title={animalName(locale, item.id)}>{item.emoji}</button>)}
           </div>
         </div>
-        <div className="animal-detail"><span className="emoji">{animal.emoji}</span><div><div className="animal-name-line"><b>{selectedAnimalName} <em className="scientific-name">({scientificName(animal.id)})</em></b><button type="button" className="animal-sound" onClick={narrateAnimal} aria-label={`${u("narrateAnimal")}: ${selectedAnimalName}`} title={u("narrateAnimal")}>🔊</button></div><small>{regionName(locale, animal.country)} · {u(animal.continent)}</small></div><button className="button" onClick={() => setScreen("strategy")}>{t("continue")}</button></div>
+        <div className="animal-detail"><span className="emoji">{animal.emoji}</span><div><div className="animal-name-line"><b>{selectedAnimalName} <em className="scientific-name">({scientificName(animal.id)})</em></b><button type="button" className="animal-sound" onClick={narrateAnimal} aria-label={`${u("narrateAnimal")}: ${selectedAnimalName}`} title={u("narrateAnimal")}>🔊</button></div><small>{regionName(locale, animal.country)} · {u(animal.continent)}</small></div><button className="button" disabled={joinBusy} onClick={() => void enterStrategy()}>{t("continue")}</button></div>
+        {requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}
       </div>
     </section>}
 
@@ -883,7 +957,7 @@ export default function HomePage() {
 
     {screen === "organizer" && <section>
       <h1 className="view-title">{t("organizer")}</h1>
-<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{officialState ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participants.filter((participant) => participant.ready && !participant.removed).length < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
+<div className="panel"><p><b>{t("code")}:</b> {code}</p><p><b>{t("participants")}:</b> {participants.filter((participant) => !participant.removed).length}/{capacity}</p><div className="organizer-status-groups"><div><b>{u("participantStatus_configuring_strategy")}</b><strong>{participantCounts.configuring}</strong></div><div><b>{u("participantStatus_ready")}</b><strong>{participantCounts.ready}</strong></div></div><div className="participants">{participants.map((participant) => <div className="participant" key={participant.player_id}><span>{participant.display_name} · {animals.find((item) => item.id === participant.animal_id)?.emoji ?? "❔"}</span><span className="status">{u(`participantStatus_${participant.membership_status ?? (participant.ready ? "ready" : "joined")}`)}</span></div>)}</div>{requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}{officialState ? <button className="button" onClick={() => setScreen("arena")}>{t("arena")}</button> : <button className="button danger" disabled={participantCounts.ready < 2} onClick={() => void startTournament()}>{t("start")}</button>}</div>
     </section>}
 
     {screen === "arena" && <section>

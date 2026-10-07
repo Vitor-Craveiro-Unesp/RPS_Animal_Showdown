@@ -18,6 +18,7 @@ from .competitive_events import events_for_round
 from .engine_gateway import EnginePlayerSnapshot, EngineUnavailable, GameEngineGateway, StartTournamentCommand
 from .models import StrategyIntent
 from .public_state import official_state_view
+from .presentation_timing import OPENING_DELAY_SECONDS, event_duration_ms, schedule_events
 from .security import generate_access_token, generate_tournament_code
 from .store import (
     InvalidCredential,
@@ -265,11 +266,11 @@ class PostgresTournamentStore:
         with self._connect() as connection, connection.cursor() as cursor:
             return self._tournament(cursor, code)
 
-    def official_state_snapshot_for(self, tournament: TournamentRecord) -> tuple[dict[str, object], int, int]:
+    def official_state_snapshot_for(self, tournament: TournamentRecord) -> tuple[dict[str, object], int, int, dict[str, object] | None]:
         """Load the latest durable Engine snapshot without exposing it directly."""
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                """SELECT s.state_document, s.state_version, r.start_sequence
+                """SELECT s.state_document, s.state_version, r.start_sequence, s.transition_id
                      FROM official_state_snapshots s JOIN tournaments t ON t.id=s.tournament_id
                      JOIN tournament_runs r ON r.tournament_id=t.id AND r.id=t.current_run_id
                     WHERE s.tournament_id = %s
@@ -283,7 +284,32 @@ class PostgresTournamentStore:
             snapshot = self._read_rules(row[0])
             if not isinstance(snapshot, dict) or not isinstance(row[1], int):
                 raise RuntimeError("Persisted official state is invalid.")
-            return snapshot, row[1], row[2]
+            cursor.execute(
+                "SELECT id, sequence, event_type, public_payload FROM official_game_events "
+                "WHERE tournament_id = %s AND transition_id = %s ORDER BY sequence",
+                (tournament.id, row[3]),
+            )
+            event_rows = cursor.fetchall()
+            previous = next((payload.get("previousState") for _, _, kind, payload in event_rows
+                             if kind == "round_resolved" and isinstance(payload, dict)), None)
+            context = None
+            if isinstance(previous, dict) and event_rows:
+                movement, countdown = float(tournament.movement_speed), float(tournament.countdown_speed)
+                last_end = max(
+                    int(payload.get("presentationAtMs", 0)) + round(event_duration_ms(kind, movement, countdown))
+                    for _, _, kind, payload in event_rows if isinstance(payload, dict)
+                )
+                now_ms = int(self._now().timestamp() * 1000)
+                if now_ms < last_end:
+                    context = {
+                        "presentation_state": previous,
+                        "presentation_server_time_ms": now_ms,
+                        "presentation_events": [
+                            {"eventId": str(event_id), "sequence": sequence, "eventType": kind, "payload": payload}
+                            for event_id, sequence, kind, payload in event_rows
+                        ],
+                    }
+            return snapshot, row[1], row[2], context
 
     def _capability(self, cursor, tournament_id: str, credential: str | None, role: str | None = None) -> tuple[str, str, str]:
         if not credential:
@@ -382,7 +408,9 @@ class PostgresTournamentStore:
                 cursor.execute("UPDATE player_strategies SET strategy_document = %s::jsonb, strategy_digest = %s, saved_at = CURRENT_TIMESTAMP WHERE id = %s", (json.dumps(payload), digest, existing[0]))
             else:
                 cursor.execute("INSERT INTO player_strategies (id, tournament_id, member_id, revision, strategy_document, strategy_digest) VALUES (%s, %s, %s, 1, %s::jsonb, %s)", (str(uuid4()), tournament.id, player.id, json.dumps(payload), digest))
-            cursor.execute("UPDATE tournament_members SET membership_status = 'configuring_strategy', updated_at = CURRENT_TIMESTAMP WHERE id = %s AND tournament_id = %s", (player.id, tournament.id))
+            cursor.execute("UPDATE tournament_members SET membership_status = 'configuring_strategy', updated_at = CURRENT_TIMESTAMP WHERE id = %s AND tournament_id = %s AND membership_status <> 'removed'", (player.id, tournament.id))
+            if cursor.rowcount != 1:
+                raise InvalidCredential()
 
     def mark_ready(self, tournament: TournamentRecord, player: PlayerRecord) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -392,7 +420,9 @@ class PostgresTournamentStore:
             cursor.execute("SELECT 1 FROM player_strategies WHERE tournament_id = %s AND member_id = %s AND locked_at IS NULL", (tournament.id, player.id))
             if cursor.fetchone() is None:
                 raise StoreError()
-            cursor.execute("UPDATE tournament_members SET membership_status = 'ready', updated_at = CURRENT_TIMESTAMP WHERE tournament_id = %s AND id = %s", (tournament.id, player.id))
+            cursor.execute("UPDATE tournament_members SET membership_status = 'ready', updated_at = CURRENT_TIMESTAMP WHERE tournament_id = %s AND id = %s AND membership_status <> 'removed'", (tournament.id, player.id))
+            if cursor.rowcount != 1:
+                raise InvalidCredential()
 
     def ready_players_snapshot(self, tournament: TournamentRecord) -> tuple[PlayerRecord, ...]:
         return tuple(player for player in tournament.players.values() if not player.removed and player.ready and player.strategy is not None)
@@ -459,6 +489,7 @@ class PostgresTournamentStore:
             cursor.execute("UPDATE tournament_members SET membership_status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE tournament_id = %s AND id = %s AND role = 'participant' AND membership_status <> 'removed'", (tournament.id, player_id))
             if cursor.rowcount != 1:
                 raise TournamentUnavailable()
+            cursor.execute("UPDATE tournament_access_capabilities SET revoked_at = CURRENT_TIMESTAMP, revocation_reason = 'participant_removed' WHERE tournament_id = %s AND subject_id = %s AND role = 'participant' AND revoked_at IS NULL", (tournament.id, player_id))
 
     def revoke_organizer_access(self, tournament: TournamentRecord) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -563,7 +594,7 @@ class PostgresTournamentStore:
             cursor.execute("INSERT INTO tournament_runs (id,tournament_id,number,start_sequence,state_document) VALUES (%s,%s,1,%s,%s::jsonb)",
                 (command.run_id,tournament.id,sequence,json.dumps(result.snapshot)))
             cursor.execute("UPDATE tournaments SET current_run_id=%s WHERE id=%s", (command.run_id,tournament.id))
-            cursor.execute("UPDATE tournaments SET status = 'running', state_version = %s, next_event_sequence = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (new_version, sequence, tournament.id))
+            cursor.execute("UPDATE tournaments SET status = 'running', state_version = %s, next_event_sequence = %s, updated_at = CURRENT_TIMESTAMP, next_transition_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second') WHERE id = %s", (new_version, sequence, OPENING_DELAY_SECONDS, tournament.id))
             cursor.execute("INSERT INTO official_transitions (id, tournament_id, command_id, transition_key, expected_state_version, resulting_state_version, state_digest) VALUES (%s, %s, %s, %s, %s, %s, %s)", (transition_id, tournament.id, command_id, str(uuid4()), previous_version, new_version, state_digest))
             cursor.execute("INSERT INTO official_state_snapshots (id, tournament_id, transition_id, state_version, state_document, state_digest) VALUES (%s, %s, %s, %s, %s::jsonb, %s)", (str(uuid4()), tournament.id, transition_id, new_version, json.dumps(result.snapshot), state_digest))
             current_round = result.snapshot.get("current_round")
@@ -635,7 +666,7 @@ class PostgresTournamentStore:
             cursor.execute("INSERT INTO tournament_runs (id,tournament_id,number,start_sequence,state_document) VALUES (%s,%s,%s,%s,%s::jsonb)",
                 (run_id,room.id,number+1,sequence+1,json.dumps(result.snapshot)))
             cursor.execute("""UPDATE tournaments SET current_run_id=%s,status='running',state_version=%s,next_event_sequence=%s,
-                updated_at=CURRENT_TIMESTAMP,next_transition_at=CURRENT_TIMESTAMP WHERE id=%s""",(run_id,version+1,sequence+1,room.id))
+                updated_at=CURRENT_TIMESTAMP,next_transition_at=CURRENT_TIMESTAMP + (%s * INTERVAL '1 second') WHERE id=%s""",(run_id,version+1,sequence+1,OPENING_DELAY_SECONDS,room.id))
             cursor.execute("""INSERT INTO official_transitions (id,tournament_id,command_id,transition_key,expected_state_version,resulting_state_version,state_digest)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""",(transition_id,room.id,command_id,str(uuid4()),version,version+1,digest))
             cursor.execute("""INSERT INTO official_state_snapshots (id,tournament_id,transition_id,state_version,state_document,state_digest)
@@ -736,6 +767,9 @@ class PostgresTournamentStore:
             )
             if not events:
                 raise RuntimeError("An official round must produce at least one public event.")
+            previous_public = official_state_view(tournament, previous_snapshot, state_version=previous_version)
+            events = [(kind, {**payload, "previousState": previous_public}) if kind == "round_resolved" else (kind, payload)
+                      for kind, payload in events]
             state_digest = sha256(json.dumps(result.snapshot, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
             transition_id = str(uuid4())
             status = "completed" if next_state.status.value == "completed" else "running"
@@ -749,13 +783,18 @@ class PostgresTournamentStore:
                         break
                     tie_streak += 1
             delay_seconds = min(3600, 2 ** min(max(tie_streak - 8, 0), 12))
+            events, next_transition_at = schedule_events(
+                events, now=self._now(), movement=float(tournament.movement_speed),
+                countdown=float(tournament.countdown_speed),
+                minimum_delay_seconds=delay_seconds,
+            )
             cursor.execute(
                 """UPDATE tournaments
                       SET status = %s, state_version = %s, next_event_sequence = %s,
                           updated_at = CURRENT_TIMESTAMP,
-                          next_transition_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second')
+                          next_transition_at = %s
                     WHERE id = %s AND state_version = %s""",
-                (status, new_version, previous_sequence + len(events), delay_seconds,
+                (status, new_version, previous_sequence + len(events), next_transition_at,
                  tournament_id, previous_version),
             )
             if cursor.rowcount != 1:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from time import time
 from enum import Enum
 from uuid import UUID
 
@@ -107,7 +108,7 @@ class OfficialEvent:
             raise ProtocolError("event payload must be an object")
 
     def to_wire(self) -> dict[str, object]:
-        return {"type": "official-event", "eventId": self.event_id, "tournamentId": self.tournament_id, "sequence": self.sequence, "eventType": self.event_type, "payload": self.payload}
+        return {"type": "official-event", "eventId": self.event_id, "tournamentId": self.tournament_id, "sequence": self.sequence, "eventType": self.event_type, "payload": self.payload, "serverTimeMs": int(time() * 1000)}
 
 
 @dataclass

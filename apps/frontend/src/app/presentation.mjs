@@ -2,6 +2,9 @@
 export function duration(ms, speed = 1) {
   return ms / ([0.5, 1, 2, 4, 8].includes(Number(speed)) ? Number(speed) : 1);
 }
+// The bundled champion.mp3 is about seven seconds. Leave a short tail before
+// revealing the other places, using the same duration as the backend clock.
+export const CHAMPION_CUE_MS = 7500;
 export function eventSteps(event, movement = 1, countdown = 1) {
   const step = (phase, ms, sound = null) => ({ phase, ms: duration(ms, movement), sound, event });
   switch (event.eventType) {
@@ -17,13 +20,25 @@ export function eventSteps(event, movement = 1, countdown = 1) {
     // podium_decided arrives before champion in the official event log. Reveal
     // the winner first, then the other places, then start the looping podium cue.
     case 'champion': return [
-      { ...step('champion', 0, 'champion'), ms: 1600 },
+      { ...step('champion', 0, 'champion'), ms: CHAMPION_CUE_MS },
       { ...step('podium_second', 0), ms: 900 },
       { ...step('podium_third', 0), ms: 900 },
       step('podium', 0, 'podium'),
     ];
     default: return [];
   }
+}
+
+// Each event carries a server-owned UTC slot. The receive time is never used
+// as the start of a competitive reveal unless talking to a legacy backend.
+export function scheduledSteps(event, movement = 1, countdown = 1, now = Date.now()) {
+  const serverSlot = event.payload?.clientPresentationAtMs;
+  let startsAtMs = Number.isFinite(serverSlot) ? serverSlot : now;
+  return eventSteps(event, movement, countdown).map(step => {
+    const scheduled = { ...step, startsAtMs };
+    startsAtMs += step.ms;
+    return scheduled;
+  });
 }
 
 // These are server snapshots. The presentation only controls when each part of

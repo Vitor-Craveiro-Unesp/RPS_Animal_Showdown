@@ -1,23 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { eventSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
+import { scheduledSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
 import { AudioManager } from "./audio-manager.mjs";
 
 // Public DTOs only: this component never submits a competitive mutation.
 type Player = { player_id: string; display_name: string; animal_id: string; second_chance?: boolean };
 type Match = { match_id: string | null; player_one_id: string | null; player_two_id: string | null; player_one_hearts: number | null; player_two_hearts: number | null; initial_hearts: number | null; winner_id: string | null; loser_id: string | null; status: string | null };
 type Round = { number: number | null; entrant_ids: string[]; matches: Match[]; bye_player_id: string | null; waiting_player_id?: string | null; second_chance_player_id?: string | null };
-type State = { run_id?: string; first_place?: string | null; second_place?: string | null; third_place?: string | null; state_version: number | null; champion_id: string | null; players: Player[]; current_round: Round | null; completed_rounds: Round[] };
+type State = { run_id?: string; presentation_state?: State; first_place?: string | null; second_place?: string | null; third_place?: string | null; state_version: number | null; champion_id: string | null; players: Player[]; current_round: Round | null; completed_rounds: Round[] };
 type Event = { eventId: string; sequence: number; eventType: string; payload: any };
-type Step = { phase: string; ms: number; sound: string | null; event: Event; number?: number };
+type Step = { phase: string; ms: number; startsAtMs: number; sound: string | null; event: Event; number?: number };
 type Props = { podiumControls?: import("react").ReactNode; state: State | null; events: Event[]; queue: PresentationQueue; revision: number; movement: string; countdown: string; audio: AudioManager | null; emoji: (id: string | null) => string; u: (key: string) => string; realtime: string };
 
 export default function CinematicArena({ podiumControls, state, events, queue, revision, movement, countdown, audio, emoji, u, realtime }: Props) {
   const [step, setStep] = useState<Step | null>(null);
   const [match, setMatch] = useState<Match | null>(null);
-  const [presentationState, setPresentationState] = useState<State | null>(state);
-  const [podiumPresented, setPodiumPresented] = useState(() => Boolean(state?.champion_id && !queue.pending.length));
+  const [presentationState, setPresentationState] = useState<State | null>(state?.presentation_state ?? state);
+  const [podiumPresented, setPodiumPresented] = useState(() => Boolean(state?.champion_id && !state?.presentation_state && !queue.pending.length));
   const [visibleSequence, setVisibleSequence] = useState(() => queue.pending.length ? queue.pending[0].sequence - 1 : events.at(-1)?.sequence ?? 0);
   const stateRef = useRef(state);
   const roundTransitionRef = useRef<{ before: State | null; after: State | null; matchId: string | null } | null>(null);
@@ -32,21 +32,20 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
-    let safetyTimer: ReturnType<typeof setTimeout>;
     let steps: Step[] = [];
     let generation = queue.generation;
     const pump = () => {
       if (stopped) return;
       if (generation !== queue.generation) {
         generation = queue.generation; steps = []; roundTransitionRef.current = null;
-        setStep(null); setMatch(null); setPresentationState(stateRef.current);
-        setPodiumPresented(Boolean(stateRef.current?.champion_id));
+        setStep(null); setMatch(null); setPresentationState(stateRef.current?.presentation_state ?? stateRef.current);
+        setPodiumPresented(Boolean(stateRef.current?.champion_id && !stateRef.current?.presentation_state));
         audio?.stop('effect'); audio?.stop('animal');
       }
       if (!steps.length) {
         const event = queue.next();
         if (event) {
-          steps = eventSteps(event, Number(movement), Number(countdown)) as Step[];
+          steps = scheduledSteps(event, Number(movement), Number(countdown)) as Step[];
           if (!steps.length && event.eventType !== 'podium_decided') setVisibleSequence(sequence => Math.max(sequence, event.sequence));
         }
       }
@@ -55,7 +54,10 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
         if (!queue.pending.length) { setStep(null); setMatch(null); }
         timer = setTimeout(pump, 60); return;
       }
-      setStep(next);
+      const untilStart = next.startsAtMs - Date.now();
+      if (untilStart > 0) { steps.unshift(next); timer = setTimeout(pump, untilStart); return; }
+      const onTime = next.ms === 0 || Date.now() < next.startsAtMs + next.ms;
+      if (onTime) setStep(next);
       const payload = next.event.payload ?? {};
       const eventState = payload.state ?? stateRef.current;
       if (next.event.eventType === 'round_resolved' && next.phase === 'countdown' && next.number === 3) {
@@ -83,21 +85,15 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       if (next.phase === 'countdown') setMatch(current => current?.match_id === payload.matchId ? current : previousMatch ?? officialMatch ?? null);
       const eventPlayers = eventState?.players ?? stateRef.current?.players ?? [];
       const soundPlayer = eventPlayers.find((item: Player) => item.player_id === (payload.winnerId ?? payload.playerId));
-      let soundChannel: 'effect' | 'animal' | null = null;
-      if (next.phase === 'victory' && soundPlayer && audio?.winner(soundPlayer.animal_id, Boolean(soundPlayer.second_chance))) soundChannel = 'animal';
-      else if (next.phase === 'secondChance' && soundPlayer && audio?.animal(soundPlayer.animal_id, true)) soundChannel = 'animal';
-      else if (next.sound && audio?.effect(next.sound)) soundChannel = 'effect';
-      if (soundChannel && next.phase !== 'countdown' && next.phase !== 'podium') {
-        const channel = soundChannel;
-        safetyTimer = setTimeout(() => audio?.stop(channel), 60_000);
-        void audio?.whenFinished(channel).then(() => {
-          clearTimeout(safetyTimer);
-          if (!stopped) timer = setTimeout(pump, next.ms);
-        });
-      } else timer = setTimeout(pump, next.ms);
+      if (onTime && next.phase === 'victory' && soundPlayer) audio?.winner(soundPlayer.animal_id, Boolean(soundPlayer.second_chance));
+      else if (onTime && next.phase === 'secondChance' && soundPlayer) audio?.animal(soundPlayer.animal_id, true);
+      else if (onTime && next.sound) audio?.effect(next.sound);
+      // Even the podium is scheduled by the server. Waiting for local audio
+      // playback to resolve would make each viewer reveal places at a different time.
+      timer = setTimeout(pump, Math.max(0, next.startsAtMs + next.ms - Date.now()));
     };
     timer = setTimeout(pump, 0);
-    return () => { stopped = true; clearTimeout(timer); clearTimeout(safetyTimer); audio?.stop('effect'); audio?.stop('animal'); };
+    return () => { stopped = true; clearTimeout(timer); audio?.stop('effect'); audio?.stop('animal'); };
   }, [queue, audio, movement, countdown, revision]);
 
   useEffect(() => {

@@ -105,6 +105,33 @@ def ready_player(client: TestClient, room: dict[str, object], display_name: str,
     return player
 
 
+def test_organizer_sees_strategy_draft_separately_from_ready(durable_client: TestClient) -> None:
+    room = create_room(durable_client)
+    code = str(room["tournament_code"])
+    joined = durable_client.post(
+        "/v1/tournaments/join",
+        json={"tournament_code": code, "display_name": "Draft player", "animal_id": "tiger"},
+    )
+    assert joined.status_code == 201, joined.text
+    player = joined.json()
+    player_headers = bearer(str(player["player_access_token"]))
+    organizer_headers = bearer(str(room["organizer_access_token"]))
+    path = f"/v1/tournaments/{code}/admin/participants"
+    assert durable_client.put(
+        f"/v1/tournaments/{code}/players/me/strategy",
+        json=strategy_payload("uniform"), headers=player_headers,
+    ).status_code == 204
+    draft = durable_client.get(path, headers=organizer_headers).json()["participants"]
+    assert draft[0]["membership_status"] == "configuring_strategy"
+    assert draft[0]["ready"] is False
+    assert durable_client.post(
+        f"/v1/tournaments/{code}/players/me/ready", json={}, headers=player_headers,
+    ).status_code == 204
+    confirmed = durable_client.get(path, headers=organizer_headers).json()["participants"]
+    assert confirmed[0]["membership_status"] == "ready"
+    assert confirmed[0]["ready"] is True
+
+
 def test_practice_can_restart_without_mutating_the_durable_tournament(durable_client: TestClient) -> None:
     room = create_room(durable_client)
     first = ready_player(durable_client, room, "Practice player")
@@ -184,6 +211,11 @@ def test_http_engine_snapshot_transition_event_and_outbox_are_one_durable_chain(
         )
         assert cursor.fetchone() == ("running", 1, 1)
         cursor.execute(
+            "SELECT EXTRACT(EPOCH FROM (next_transition_at - updated_at)) "
+            "FROM tournaments WHERE id = %s", (room["tournament_id"],),
+        )
+        assert cursor.fetchone()[0] >= 3
+        cursor.execute(
             "SELECT state_document FROM official_state_snapshots WHERE tournament_id = %s AND state_version = 1",
             (room["tournament_id"],),
         )
@@ -217,13 +249,22 @@ def test_durable_competition_reaches_champion_with_bye_ordered_events_and_replay
     store = PostgresTournamentStore(str(TEST_DATABASE_URL))
     engine = GameEngineAdapter()
     # Three distinct strategies yield six decisive exchanges, including Second Chance.
-    for _ in range(6):
+    for exchange in range(6):
         with connection() as database, database.cursor() as cursor:
             cursor.execute(
                 "UPDATE tournaments SET updated_at = CURRENT_TIMESTAMP - INTERVAL '2 seconds', next_transition_at = CURRENT_TIMESTAMP - INTERVAL '2 seconds' WHERE id = %s",
                 (room["tournament_id"],),
             )
         assert store.advance_one_running_tournament(engine)
+        if exchange == 0:
+            live = durable_client.get(
+                f"/v1/tournaments/{code}/official-state",
+                headers=bearer(str(room["organizer_access_token"])),
+            ).json()
+            assert live["presentation_state"]["state_version"] == 1
+            assert live["presentation_events"]
+            assert all("presentationAtMs" in event["payload"] for event in live["presentation_events"])
+            assert all("strategy" not in repr(event["payload"]) for event in live["presentation_events"])
         with connection() as database, database.cursor() as cursor:
             cursor.execute("SELECT status FROM tournaments WHERE id = %s", (room["tournament_id"],))
             if cursor.fetchone()[0] == "completed":

@@ -45,6 +45,12 @@ class RealtimeAuthorizationTests(unittest.TestCase):
 
 
 class RealtimeOrderingTests(unittest.TestCase):
+    def test_wire_event_exposes_server_clock_without_changing_official_payload(self) -> None:
+        official = event()
+        frame = official.to_wire()
+        self.assertIsInstance(frame["serverTimeMs"], int)
+        self.assertEqual(frame["payload"], {"public": True})
+
     def test_accepts_contiguous_events(self) -> None:
         cursor = EventCursor(TOURNAMENT_A)
         self.assertEqual(cursor.accept(event()), EventDisposition.ACCEPTED)

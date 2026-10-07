@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationQueue, eventSteps, duration, stateForPresentation } from './presentation.mjs';
+import { PresentationQueue, eventSteps, scheduledSteps, duration, stateForPresentation } from './presentation.mjs';
 import { AUDIO_ASSETS, AudioManager } from './audio-manager.mjs';
 
 const event = (sequence, eventType = 'round_resolved', stateVersion = sequence) => ({ eventId: `id-${sequence}`, sequence, eventType, payload: { stateVersion } });
@@ -82,6 +82,7 @@ test('the winner appears alone before silver, bronze and the looping podium musi
   assert.deepEqual(steps.map(step => [step.phase, step.sound]), [
     ['champion', 'champion'], ['podium_second', null], ['podium_third', null], ['podium', 'podium'],
   ]);
+  assert.deepEqual(steps.map(step => step.ms), [7500, 900, 900, 0]);
   audio.effect(steps[0].sound);
   const champion = audio.channels.get('effect');
   let finished = false;
@@ -147,4 +148,14 @@ for (const speed of [.5, 1, 2, 4, 8]) test(`countdown stays ordered at ${speed}x
   const steps = eventSteps(event(1), speed, speed);
   assert.deepEqual(steps.slice(0, 3).map(step => step.number), [3, 2, 1]);
   assert.equal(steps[3].phase, 'reveal'); assert.equal(steps[0].ms, 650 / speed); assert.equal(duration(100, speed), 100 / speed);
+});
+
+test('every viewer uses the same authoritative phase times instead of arrival time', () => {
+  const official = { ...event(12), payload: { stateVersion: 12, clientPresentationAtMs: 10_000 } };
+  const early = scheduledSteps(official, 1, 1, 8_000);
+  const late = scheduledSteps(official, 1, 1, 9_500);
+  assert.deepEqual(early.map(step => step.startsAtMs), late.map(step => step.startsAtMs));
+  assert.deepEqual(early.slice(0, 3).map(step => step.startsAtMs), [10_000, 10_650, 11_300]);
+  assert.equal(early.at(-1).startsAtMs, 12_600);
+  assert.equal(scheduledSteps(event(13), 1, 1, 20_000)[0].startsAtMs, 20_000);
 });

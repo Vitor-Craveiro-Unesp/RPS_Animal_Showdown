@@ -95,6 +95,14 @@ recuperação de organizador no MVP.
 
 O organizador define quando o torneio começa.
 
+Ao avançar da escolha do animal para a estratégia, a inscrição aparece no
+painel como **Montando estratégia**. Só após confirmar **Estou pronto** ela
+passa a **Pronto**; apenas participantes prontos entram no chaveamento. O
+servidor espera 3 segundos após o Start antes de resolver a primeira jogada.
+Os eventos oficiais incluem horários de apresentação definidos no backend,
+para que telas conectadas mostrem cada fase do duelo no mesmo instante, mesmo
+quando recebem os eventos com latências diferentes.
+
 A capacidade da sala representa apenas o número máximo de jogadores.
 
 Uma sala para 10 pessoas poderá começar, por exemplo, com:
