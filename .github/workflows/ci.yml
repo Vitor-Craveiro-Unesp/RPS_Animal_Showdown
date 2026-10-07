@@ -23,7 +23,13 @@ jobs:
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run lint:frontend
-      - run: npm run build:frontend
+      - name: Build frontend with CI-only URLs
+        run: npm run build:frontend
+        env:
+          # No deployment uses this artifact. Production URLs remain configured
+          # only in Vercel, while CI exercises the strict HTTPS/WSS build guard.
+          API_INTERNAL_BASE_URL: https://example.invalid
+          NEXT_PUBLIC_REALTIME_URL: wss://example.invalid/v1/realtime
 
   python:
     name: Python, migrations and realtime checks
