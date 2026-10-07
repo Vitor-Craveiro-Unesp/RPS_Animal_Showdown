@@ -12,3 +12,9 @@ export function realtimeDisplayStatus({ hasSnapshot, websocketSubscribed }) {
 export function shouldPollOfficialSnapshot(status) {
   return status === "snapshot" || status === "fallback";
 }
+
+const officialRealtimeScreens = new Set(["organizer", "waiting", "animal-rush", "animal-rush-result", "training-avatar", "training", "training-complete", "arena"]);
+
+export function isOfficialRealtimeScreen(screen) {
+  return officialRealtimeScreens.has(screen);
+}

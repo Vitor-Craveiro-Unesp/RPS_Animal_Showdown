@@ -2,10 +2,16 @@
 export function duration(ms, speed = 1) {
   return ms / ([0.5, 1, 2, 4, 8].includes(Number(speed)) ? Number(speed) : 1);
 }
-// Use the HTTP round-trip midpoint instead of the response arrival instant.
-// It bounds network-latency error and keeps one clock anchor for the run.
-export function serverClockOffset(serverTimeMs, sentAtMs, receivedAtMs) {
+// Prefer four HTTP timestamps so backend processing is not mistaken for
+// network latency; older backends fall back to the round-trip midpoint.
+export function serverClockOffset(serverTimeMs, sentAtMs, receivedAtMs, serverReceivedAtMs) {
   if (![serverTimeMs, sentAtMs, receivedAtMs].every(Number.isFinite) || receivedAtMs < sentAtMs) return null;
+  if (serverReceivedAtMs !== undefined) {
+    if (!Number.isFinite(serverReceivedAtMs) || serverReceivedAtMs > serverTimeMs) return null;
+    // Four timestamps remove server processing time from the round-trip estimate.
+    // A slow database read must not shift one viewer's animation clock.
+    return ((sentAtMs - serverReceivedAtMs) + (receivedAtMs - serverTimeMs)) / 2;
+  }
   return (sentAtMs + receivedAtMs) / 2 - serverTimeMs;
 }
 export function presentationContextKey(snapshot) {

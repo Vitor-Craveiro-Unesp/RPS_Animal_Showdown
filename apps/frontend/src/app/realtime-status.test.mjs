@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
+import { isOfficialRealtimeScreen, realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
+
+test("organizer reconnects to the official stream after a refresh", () => {
+  for (const screen of ["organizer", "waiting", "arena"]) assert.equal(isOfficialRealtimeScreen(screen), true);
+  for (const screen of ["home", "create", "join"]) assert.equal(isOfficialRealtimeScreen(screen), false);
+});
 
 test("an official snapshot resolves the organizer's connecting state without claiming a WebSocket subscription", () => {
   assert.equal(realtimeDisplayStatus({ hasSnapshot: false, websocketSubscribed: false }), "connecting");

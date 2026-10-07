@@ -180,6 +180,25 @@ test('clock calibration removes half the HTTP round trip and stays stable across
   assert.equal(presentationContextKey({ ...snapshot, state_version: 5 }), 'run-1:5:8:9');
 });
 
+test('four-timestamp calibration excludes variable backend processing time', () => {
+  // Client clock is 100 ms ahead. Each network leg takes 50 ms, while the
+  // backend spends 400 ms reading the snapshot before stamping its response.
+  assert.equal(serverClockOffset(10_400, 10_050, 10_550, 10_000), 100);
+  assert.notEqual(serverClockOffset(10_400, 10_050, 10_550), 100);
+  assert.equal(serverClockOffset(10_400, 10_050, 10_550, 10_401), null);
+});
+
+test('different response processing times preserve the same official reveal slot', () => {
+  const serverSlot = 20_000;
+  const firstOffset = serverClockOffset(10_400, 10_050, 10_550, 10_000);
+  const secondOffset = serverClockOffset(10_900, 10_050, 11_050, 10_000);
+  assert.equal(firstOffset, 100);
+  assert.equal(secondOffset, 100);
+  const first = scheduledSteps({ ...event(1), payload: { clientPresentationAtMs: serverSlot + firstOffset } });
+  const second = scheduledSteps({ ...event(1), payload: { clientPresentationAtMs: serverSlot + secondOffset } });
+  assert.deepEqual(first.map(step => step.startsAtMs), second.map(step => step.startsAtMs));
+});
+
 for (const movement of [.5, 1, 2, 4, 8]) for (const countdown of [.5, 1, 2, 4, 8]) {
   test(`independent ${movement}x movement and ${countdown}x countdown keep phase durations ordered`, () => {
     const start = 100_000;

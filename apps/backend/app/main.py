@@ -213,6 +213,7 @@ def create_app(
         response so a successful creation or join response cannot be replayed
         from shared history or cache storage.
         """
+        request.state.server_received_at_ms = int(time() * 1000)
         content_length = request.headers.get("content-length")
         if request.url.path.startswith("/v1/") and content_length:
             try:
@@ -698,6 +699,7 @@ def create_app(
 
     @app.get("/v1/tournaments/{code}/official-state", tags=["tournaments"])
     def get_official_state(
+        request: Request,
         tournament: TournamentRecord = Depends(require_room),
     ) -> dict[str, object]:
         """Authenticated fallback snapshot for replay gaps and reconnects.
@@ -722,6 +724,7 @@ def create_app(
                     public.update(presentation)
             # Available even before the first duel, so every viewer can
             # calibrate its clock before the first realtime event arrives.
+            public["server_received_at_ms"] = request.state.server_received_at_ms
             public["server_time_ms"] = int(time() * 1000)
             return public
         except StoreError as error:

@@ -429,6 +429,8 @@ def test_official_start_invokes_engine_from_server_snapshot_locks_strategies_and
     )
     assert official.status_code == 200
     assert isinstance(official.json()["server_time_ms"], int)
+    assert isinstance(official.json()["server_received_at_ms"], int)
+    assert official.json()["server_received_at_ms"] <= official.json()["server_time_ms"]
     assert client.put(
         f"/v1/tournaments/{code}/players/me/strategy",
         json=strategy_payload(),

@@ -6,7 +6,7 @@ import CinematicArena from "./cinematic-arena";
 import { PresentationQueue, presentationContextKey, serverClockOffset } from "./presentation.mjs";
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
-import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
+import { isOfficialRealtimeScreen, realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
 import { participantStatusCounts } from "./participant-status.mjs";
 import { hasCurrentTournamentArena, restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { normalizeTournamentCode, tournamentApiPath } from "./tournament-code.mjs";
@@ -48,10 +48,9 @@ type PlaybackSpeed = "0.5" | "1" | "2" | "4" | "8";
 type OfficialPlayer = { player_id: string; display_name: string; animal_id: string };
 type OfficialRound = { number: number | null; entrant_ids: string[]; bye_player_id: string | null; matches: OfficialMatch[] };
 type OfficialMatch = { match_id: string | null; status: string | null; player_one_id: string | null; player_two_id: string | null; initial_hearts: number | null; player_one_hearts: number | null; player_two_hearts: number | null; winner_id: string | null; loser_id: string | null; rounds: Array<{ number: number | null; player_one_move: string | null; player_two_move: string | null; outcome: string | null }> };
-type OfficialState = { run_id?: string; run_start_sequence?: number; server_time_ms?: number; presentation_state?: OfficialState; presentation_events?: OfficialEvent[]; presentation_server_time_ms?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
+type OfficialState = { run_id?: string; run_start_sequence?: number; server_received_at_ms?: number; server_time_ms?: number; presentation_state?: OfficialState; presentation_events?: OfficialEvent[]; presentation_server_time_ms?: number; first_place?: string | null; second_place?: string | null; third_place?: string | null; sound_effects_enabled?: boolean; background_music_enabled?: boolean; movement_speed?: PlaybackSpeed; countdown_speed?: PlaybackSpeed; tournament_id: string; state_version: number | null; status: string | null; hearts_per_match: number | null; champion_id: string | null; players: OfficialPlayer[]; current_round: OfficialRound | null; completed_rounds: OfficialRound[] };
 type OfficialEvent = { eventId: string; sequence: number; eventType: string; payload: unknown };
 const animalRushEmoji: Record<AnimalRushMove, string> = { rock: "✊", paper: "📄", scissors: "✂️" };
-const tournamentRealtimeScreens = new Set<Screen>(["waiting", "animal-rush", "animal-rush-result", "training-avatar", "training", "training-complete", "arena"]);
 const resetTrainingChampionCue = (reference: { current: string | null }) => { reference.current = null; };
 const playbackSpeeds: ReadonlyArray<{ value: PlaybackSpeed; label: string }> = [
   { value: "0.5", label: "speed05" },
@@ -198,6 +197,7 @@ export default function HomePage() {
   const latestVersionRef = useRef(0);
   const lastOfficialStateRef = useRef<OfficialState | null>(null);
   const serverClockOffsetRef = useRef<number | null>(null);
+  const serverClockCalibratedRef = useRef(false);
   const readyBusyRef = useRef(false);
   const [readyBusy, setReadyBusy] = useState(false);
   const joinBusyRef = useRef(false);
@@ -209,6 +209,7 @@ export default function HomePage() {
       presentationQueue.reset();
       lastRestoredContextRef.current = null;
       serverClockOffsetRef.current = null;
+      serverClockCalibratedRef.current = false;
       audio?.resetRun();
       eventsRef.current = eventsRef.current.filter(event => (event.payload as { runId?: string })?.runId === state.run_id);
       setOfficialEvents(eventsRef.current);
@@ -222,8 +223,9 @@ export default function HomePage() {
     if (contextKey === lastRestoredContextRef.current) return true;
     presentationQueue.reset();
     presentationQueue.reconcile((snapshot.state_version ?? 0) - 1);
-    if (serverClockOffsetRef.current === null) {
-      serverClockOffsetRef.current = serverClockOffset(snapshot.presentation_server_time_ms, sentAtMs, receivedAtMs);
+    if (!serverClockCalibratedRef.current) {
+      serverClockOffsetRef.current = serverClockOffset(snapshot.server_time_ms ?? snapshot.presentation_server_time_ms, sentAtMs, receivedAtMs, snapshot.server_received_at_ms);
+      serverClockCalibratedRef.current = serverClockOffsetRef.current !== null;
     }
     const offset = serverClockOffsetRef.current ?? 0;
     for (const event of snapshot.presentation_events) {
@@ -250,6 +252,7 @@ export default function HomePage() {
     presentationQueue.reset();
     lastRestoredContextRef.current = null;
     serverClockOffsetRef.current = null;
+    serverClockCalibratedRef.current = false;
     latestVersionRef.current = 0;
     lastOfficialStateRef.current = null;
   }, [presentationQueue, tournamentId]);
@@ -271,7 +274,7 @@ export default function HomePage() {
   const selectedAnimalName = animalName(locale, animal.id);
   const guestTraining = screen === "guest-training" || screen === "guest-training-complete";
   const hearts = (count = guestTraining ? (guestHearts ?? 1) : heartsRequired) => "❤️".repeat(count);
-  const realtimeEligible = tournamentRealtimeScreens.has(screen);
+  const realtimeEligible = isOfficialRealtimeScreen(screen);
   const rushRoundMs = animalRushRoundDuration(rushStreak);
 
   const clearAnimalRushTimer = useCallback(() => {
@@ -363,6 +366,7 @@ export default function HomePage() {
       const payload = await response.json();
       if (disposed) return;
       setParticipants(Array.isArray(payload.participants) ? payload.participants : []);
+      if (typeof payload.capacity === "number") setCapacity(payload.capacity);
     };
     void loadParticipants();
     const timer = window.setInterval(() => void loadParticipants(), 10_000);
@@ -403,8 +407,9 @@ export default function HomePage() {
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
-          if (serverClockOffsetRef.current === null && typeof payload.server_time_ms === "number") {
-            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs);
+          if (!serverClockCalibratedRef.current && typeof payload.server_time_ms === "number") {
+            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs, payload.server_received_at_ms);
+            serverClockCalibratedRef.current = serverClockOffsetRef.current !== null;
           }
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
@@ -416,7 +421,7 @@ export default function HomePage() {
           if (payload.countdown_speed) setCountdownSpeed(payload.countdown_speed);
         }
         if (typeof payload.hearts_per_match === "number") setHeartsRequired(payload.hearts_per_match);
-        interruptForOfficialStart();
+        if (!tournamentStartedRef.current) interruptForOfficialStart();
       } catch { if (!disposed) reportRequestFailure(); }
     };
     void refreshOfficial();
@@ -455,8 +460,9 @@ export default function HomePage() {
         const version = payload.state_version ?? 0;
         if (version >= latestVersionRef.current) {
           synchronizeRun(payload);
-          if (serverClockOffsetRef.current === null && typeof payload.server_time_ms === "number") {
-            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs);
+          if (!serverClockCalibratedRef.current && typeof payload.server_time_ms === "number") {
+            serverClockOffsetRef.current = serverClockOffset(payload.server_time_ms, sentAtMs, receivedAtMs, payload.server_received_at_ms);
+            serverClockCalibratedRef.current = serverClockOffsetRef.current !== null;
           }
           latestVersionRef.current = version;
           lastOfficialStateRef.current = payload;
@@ -468,7 +474,7 @@ export default function HomePage() {
           if (payload.countdown_speed) setCountdownSpeed(payload.countdown_speed);
         }
         if (typeof payload.hearts_per_match === "number") setHeartsRequired(payload.hearts_per_match);
-        interruptForOfficialStart();
+        if (!tournamentStartedRef.current) interruptForOfficialStart();
       }
       return payload;
     };
@@ -540,7 +546,7 @@ export default function HomePage() {
             setOfficialState(eventState);
             if (!tournamentStartedRef.current) interruptForOfficialStart();
           }
-          if (frame.eventType === "tournament_started") { interruptForOfficialStart(); void loadSnapshot().catch(() => setRealtimeStatus("fallback")); }
+          if (frame.eventType === "tournament_started") { if (!tournamentStartedRef.current) interruptForOfficialStart(); void loadSnapshot().catch(() => setRealtimeStatus("fallback")); }
         };
         // Already scheduled official events remain valid during a short socket
         // outage; the next snapshot will reconcile only if the state changed.
@@ -586,6 +592,7 @@ export default function HomePage() {
       latestVersionRef.current = 0;
       lastSequenceRef.current = 0;
       serverClockOffsetRef.current = null;
+      serverClockCalibratedRef.current = false;
       setRealtimeStatus("connecting");
       setOfficialStartNotice(false);
       if (officialStartNoticeTimerRef.current !== null) window.clearTimeout(officialStartNoticeTimerRef.current);
@@ -680,16 +687,22 @@ export default function HomePage() {
     // The Start response is authoritative, but the organizer must not wait for
     // a later WebSocket handshake before receiving the server snapshot.
     try {
+      const sentAtMs = Date.now();
       const snapshot = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${organizerToken}` } });
       if (!snapshot.ok) throw new Error("official-state unavailable");
       const state = await snapshot.json() as OfficialState;
+      const receivedAtMs = Date.now();
       const version = state.state_version ?? 0;
       if (version >= latestVersionRef.current) {
         synchronizeRun(state);
+        if (!serverClockCalibratedRef.current && typeof state.server_time_ms === "number") {
+          serverClockOffsetRef.current = serverClockOffset(state.server_time_ms, sentAtMs, receivedAtMs, state.server_received_at_ms);
+          serverClockCalibratedRef.current = serverClockOffsetRef.current !== null;
+        }
         latestVersionRef.current = version;
         lastOfficialStateRef.current = state;
         setOfficialState(state);
-        reconcilePresentation(version);
+        if (!restorePresentation(state, sentAtMs, receivedAtMs)) reconcilePresentation(version);
       }
       if (typeof state.sound_effects_enabled === "boolean") setSoundEffectsEnabled(state.sound_effects_enabled);
       if (typeof state.background_music_enabled === "boolean") setBackgroundMusicEnabled(state.background_music_enabled);
