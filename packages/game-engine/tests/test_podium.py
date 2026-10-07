@@ -32,7 +32,7 @@ def run(count, hearts, seed):
     pytest.fail("Unfinished tournament")
 
 
-@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9, 15])
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9, 15, 25, 32, 40])
 @pytest.mark.parametrize("hearts", [1, 2, 3, 4])
 def test_official_podium_and_order(count, hearts):
     initial, state, order = run(count, hearts, count * 10 + hearts)

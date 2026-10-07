@@ -38,7 +38,11 @@ O banco força chave idempotente escopada, transição única por versão e sequ
 3. validação HMAC do ticket **e** consulta persistida de ticket/capability não expirada ou revogada;
 4. em até 10 segundos, `{ "type": "resume", "afterSequence": N }`.
 
-Depois da assinatura, aceita apenas novos `resume`; qualquer tentativa de publicar evento fecha o socket com `1008`. Em toda saída, as tarefas pendentes de recepção/fanout são canceladas e a fila é removida da assinatura. O endpoint não conhece código público de torneio. Os testes de conexão verificam Origin, isolamento entre UUIDs, replay e publicação forjada.
+Depois da assinatura, aceita `resume` e `{ "type": "renew", "ticket": "..." }`; qualquer tentativa de publicar evento fecha o socket com `1008`. A renovação exige ticket válido no banco, mesma sala/sujeito/papel e expiração posterior. Tem intervalo mínimo de 30 segundos, verificado antes da consulta ao banco, e não reinicia cursor, assinatura ou orçamento de replay. A resposta `renewed` informa `expiresInMs`, usado pelo navegador para renovar 60–75 segundos antes da expiração sem depender do relógio local. A revalidação/revogação continua a cada cinco segundos.
+
+Em toda saída, as tarefas pendentes de recepção/fanout são canceladas e a fila é removida da assinatura. O endpoint não conhece código público de torneio. Os testes de conexão verificam Origin, isolamento entre UUIDs, replay, renovação e publicação forjada.
+
+O limitador PostgreSQL do handshake roda em thread, assim como a verificação de tickets; nenhuma dessas operações bloqueia o event loop que entrega eventos aos espectadores já conectados. A implantação permanece com **um worker** enquanto o fanout for local ao processo.
 
 `realtime/postgres.py` traz `PostgresRealtimeStore` para ticket/replay duráveis e `PostgresOutboxWorker` com `FOR UPDATE SKIP LOCKED` e lease. O worker só publica depois do commit da transição e marca `published_at` após entrega. Falhas liberam a lease e a entrega permanece at-least-once. `DatabaseBackedEventStream` combina replay PostgreSQL com fanout local do worker.
 

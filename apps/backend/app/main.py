@@ -58,16 +58,21 @@ from .store import (
 
 
 RATE_LIMITS = {
-    "join": RateLimit(max_requests=12, window_seconds=600),
+    # One venue/Wi-Fi can put all 40 participants behind the same public IP.
+    # Aggregate budgets must not replace the tighter per-capability budgets.
+    "join": RateLimit(max_requests=120, window_seconds=600),
+    "strategy_ip": RateLimit(max_requests=240, window_seconds=60),
     "strategy": RateLimit(max_requests=20, window_seconds=60),
     "admin": RateLimit(max_requests=20, window_seconds=60),
     "training": RateLimit(max_requests=30, window_seconds=60),
     "guest_training": RateLimit(max_requests=30, window_seconds=60),
     # This is deliberately checked before participant capability lookup so a
     # stream of invalid bearer values cannot brute-force the room boundary.
-    "player_auth_ip": RateLimit(max_requests=120, window_seconds=60),
+    "player_auth_ip": RateLimit(max_requests=1200, window_seconds=60),
     "player_auth": RateLimit(max_requests=20, window_seconds=60),
     "realtime": RateLimit(max_requests=30, window_seconds=60),
+    "realtime_ticket_ip": RateLimit(max_requests=240, window_seconds=60),
+    "realtime_connect_ip": RateLimit(max_requests=160, window_seconds=60),
 }
 
 DEFAULT_ALLOWED_ORIGINS = ("http://localhost:3000",)
@@ -88,7 +93,12 @@ class RealtimeRateLimitMiddleware:
             client = scope.get("client")
             subject = f"ip:{client[0]}" if client else "ip:unknown"
             try:
-                self.limiter.check("realtime", subject, RATE_LIMITS["realtime"])
+                # PostgreSQL I/O must never block the ASGI event loop: existing
+                # spectators must keep receiving frames while others connect.
+                await asyncio.to_thread(
+                    self.limiter.check, "realtime_connect_ip", subject,
+                    RATE_LIMITS["realtime_connect_ip"],
+                )
             except RateLimitExceeded:
                 # This occurs before websocket.accept(), so failed handshakes
                 # cannot consume connection resources or enumerate tickets.
@@ -439,7 +449,7 @@ def create_app(
         room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
     ) -> Response:
         credential = _credential_from_header(authorization)
-        limit(request, "strategy")
+        limit(request, "strategy_ip")
         limit(request, "strategy", _credential_subject(credential))
         tournament, player = room
         try:
@@ -456,7 +466,7 @@ def create_app(
         room: tuple[TournamentRecord, PlayerRecord] = Depends(require_player),
     ) -> Response:
         credential = _credential_from_header(authorization)
-        limit(request, "strategy")
+        limit(request, "strategy_ip")
         limit(request, "strategy", _credential_subject(credential))
         tournament, player = room
         try:
@@ -552,7 +562,8 @@ def create_app(
         # Keep removals visible to the organizer as room history. They remain
         # excluded from capacity and from the confirmed-player start rule.
         participants = [_player_view(player) for player in tournament.players.values()]
-        return {"tournament_id": tournament.id, "tournament_code": tournament.code, "participants": participants}
+        return {"tournament_id": tournament.id, "tournament_code": tournament.code,
+                "capacity": tournament.capacity, "participants": participants}
 
     @app.patch("/v1/tournaments/{code}/admin/configuration", tags=["admin"])
     def update_configuration(
@@ -687,7 +698,7 @@ def create_app(
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
         credential = _credential_from_header(authorization)
-        limit(request, "realtime")
+        limit(request, "realtime_ticket_ip")
         limit(request, "realtime", _credential_subject(credential))
         if not isinstance(tournament_store, PostgresTournamentStore) or realtime_ticket_codec is None:
             raise HTTPException(status_code=503, detail="Realtime is not configured for this environment.")
@@ -695,7 +706,8 @@ def create_app(
             ticket, expires_at = tournament_store.issue_realtime_ticket(code.upper(), credential, realtime_ticket_codec)
         except StoreError as error:
             _raise_store_error(error)
-        return {"ticket": ticket, "expires_at": expires_at.isoformat()}
+        return {"ticket": ticket, "expires_at": expires_at.isoformat(),
+                "expires_in_seconds": max(0, int(expires_at.timestamp() - time()))}
 
     @app.get("/v1/tournaments/{code}/official-state", tags=["tournaments"])
     def get_official_state(

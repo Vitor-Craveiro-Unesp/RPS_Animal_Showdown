@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -111,6 +112,8 @@ def create_realtime_endpoint(
     stream: EventStream,
     origins: OriginPolicy,
     authentication_timeout_seconds: float = 10.0,
+    minimum_renewal_interval_seconds: float = 30.0,
+    recheck_interval_seconds: float = 5.0,
 ):
     """Create the endpoint callable; registration remains explicit at the Backend boundary."""
     async def official_events(websocket: WebSocket) -> None:
@@ -150,6 +153,8 @@ def create_realtime_endpoint(
             authenticate = validate_client_frame(
                 await asyncio.wait_for(websocket.receive_json(), timeout=authentication_timeout_seconds)
             )
+            if authenticate["type"] != "authenticate":
+                raise ProtocolError("authentication is required first")
             ticket = str(authenticate["ticket"])
             claims = await asyncio.to_thread(verifier.verify_active, ticket)
             channel = authorize_subscription(claims.grant, str(authenticate["channel"]))
@@ -170,7 +175,8 @@ def create_realtime_endpoint(
             receive_task = asyncio.create_task(websocket.receive_json())
             event_task = asyncio.create_task(subscription.get())
             clock = asyncio.get_running_loop()
-            recheck_at = clock.time() + 5
+            renewed_at = clock.time()
+            recheck_at = clock.time() + recheck_interval_seconds
             while True:
                 done, _ = await asyncio.wait(
                     {receive_task, event_task}, timeout=max(0, recheck_at - clock.time()),
@@ -178,7 +184,7 @@ def create_realtime_endpoint(
                 )
                 if clock.time() >= recheck_at:
                     await asyncio.to_thread(verifier.verify_active, ticket)
-                    recheck_at = clock.time() + 5
+                    recheck_at = clock.time() + recheck_interval_seconds
                 if not done:
                     continue
                 if event_task in done:
@@ -193,6 +199,20 @@ def create_realtime_endpoint(
                 if receive_task in done:
                     # A client may replay after detecting a gap, but can never publish.
                     frame = validate_client_frame(receive_task.result())
+                    if frame["type"] == "renew":
+                        # Check the budget before doing database work. Renewal
+                        # extends the same subscription, never its privileges.
+                        if clock.time() - renewed_at < minimum_renewal_interval_seconds:
+                            raise ProtocolError("too many renewals")
+                        renewed = await asyncio.to_thread(verifier.verify_active, str(frame["ticket"]))
+                        if renewed.grant != claims.grant or renewed.expires_at <= claims.expires_at:
+                            raise ProtocolError("invalid renewal grant")
+                        claims, ticket = renewed, str(frame["ticket"])
+                        renewed_at = clock.time()
+                        await websocket.send_json({"type": "renewed", "expiresAtMs": claims.expires_at * 1000,
+                                                   "expiresInMs": max(0, int((claims.expires_at - time()) * 1000))})
+                        receive_task = asyncio.create_task(websocket.receive_json())
+                        continue
                     if frame["type"] != "resume":
                         raise ProtocolError("client publishing is not supported")
                     resume_requests += 1
@@ -244,6 +264,8 @@ def register_realtime_endpoint(
     stream: EventStream,
     origins: OriginPolicy,
     authentication_timeout_seconds: float = 10.0,
+    minimum_renewal_interval_seconds: float = 30.0,
+    recheck_interval_seconds: float = 5.0,
 ) -> None:
     """Register the socket without taking ownership of the HTTP application factory.
 
@@ -257,5 +279,7 @@ def register_realtime_endpoint(
             stream=stream,
             origins=origins,
             authentication_timeout_seconds=authentication_timeout_seconds,
+            minimum_renewal_interval_seconds=minimum_renewal_interval_seconds,
+            recheck_interval_seconds=recheck_interval_seconds,
         ),
     )

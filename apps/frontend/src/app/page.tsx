@@ -7,6 +7,7 @@ import { PresentationQueue, presentationContextKey, serverClockOffset } from "./
 import { AUDIO_ASSETS, AudioManager } from "./audio-manager.mjs";
 import { requestFeedbackKind } from "./request-feedback.mjs";
 import { isOfficialRealtimeScreen, realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
+import { RealtimeTicketRenewal } from "./realtime-ticket.mjs";
 import { participantStatusCounts } from "./participant-status.mjs";
 import { hasCurrentTournamentArena, restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
 import { normalizeTournamentCode, tournamentApiPath } from "./tournament-code.mjs";
@@ -438,6 +439,18 @@ export default function HomePage() {
     let hasSynchronizedSnapshot = Boolean(lastOfficialStateRef.current);
     let websocketSubscribed = false;
     const accessToken = organizerToken || playerToken;
+    const requestTicket = async () => {
+      const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/realtime/ticket`, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!response.ok) throw new Error("ticket unavailable");
+      return await response.json() as { ticket: string; expires_in_seconds: number };
+    };
+    const ticketRenewal = new RealtimeTicketRenewal({
+      fetchTicket: async () => (await requestTicket()).ticket,
+      send: (frame: object) => {
+        if (!disposed && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
+      },
+      onFailure: () => { if (!disposed) socket?.close(); },
+    });
     const sequenceKey = `rps-realtime-sequence:${tournamentId || code}`;
     const eventsKey = `rps-realtime-events:${tournamentId || code}`;
     lastSequenceRef.current = Number(sessionStorage.getItem(sequenceKey) ?? "0") || 0;
@@ -480,6 +493,7 @@ export default function HomePage() {
     };
     const scheduleReconnect = () => {
       if (disposed) return;
+      ticketRenewal.stop();
       websocketSubscribed = false;
       setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed }));
       if (attempt >= 5) { setRealtimeStatus("fallback"); return; }
@@ -495,9 +509,7 @@ export default function HomePage() {
     const connect = async () => {
       setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed }));
       try {
-        const ticketResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/realtime/ticket`, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
-        if (!ticketResponse.ok) throw new Error("ticket unavailable");
-        const { ticket } = await ticketResponse.json() as { ticket: string };
+        const { ticket, expires_in_seconds } = await requestTicket();
         // Establish the presentation version barrier before replay can arrive.
         await loadSnapshot();
         if (disposed) return;
@@ -506,7 +518,16 @@ export default function HomePage() {
         socket.onmessage = (message) => {
           let frame: Record<string, unknown>;
           try { frame = JSON.parse(String(message.data)) as Record<string, unknown>; } catch { return; }
-          if (frame.type === "subscribed") { attempt = 0; websocketSubscribed = true; setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed })); socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current })); return; }
+          if (frame.type === "subscribed") {
+            attempt = 0; websocketSubscribed = true;
+            setRealtimeStatus(realtimeDisplayStatus({ hasSnapshot: hasSynchronizedSnapshot, websocketSubscribed }));
+            socket?.send(JSON.stringify({ type: "resume", afterSequence: lastSequenceRef.current }));
+            // Older servers still close/reconnect normally until the backend
+            // supporting renewal is deployed.
+            if (Number.isFinite(expires_in_seconds)) ticketRenewal.start(expires_in_seconds * 1000);
+            return;
+          }
+          if (frame.type === "renewed") { ticketRenewal.acknowledge(Number(frame.expiresInMs)); return; }
           if (frame.type === "replay-reset" && Number.isSafeInteger(frame.afterSequence) && Number(frame.afterSequence) >= 0) {
             lastSequenceRef.current = Math.max(lastSequenceRef.current, Number(frame.afterSequence));
             sessionStorage.setItem(sequenceKey, String(lastSequenceRef.current));
@@ -555,7 +576,7 @@ export default function HomePage() {
       } catch { void loadSnapshot().catch(() => undefined); scheduleReconnect(); }
     };
     void connect();
-    return () => { disposed = true; if (retryTimer) window.clearTimeout(retryTimer); socket?.close(); };
+    return () => { disposed = true; ticketRenewal.stop(); if (retryTimer) window.clearTimeout(retryTimer); socket?.close(); };
   }, [code, interruptForOfficialStart, organizerToken, playerToken, realtimeEligible, sessionRestored, tournamentId, reconcilePresentation, restorePresentation, audio, presentationQueue, synchronizeRun]);
 
   async function createTournament() {

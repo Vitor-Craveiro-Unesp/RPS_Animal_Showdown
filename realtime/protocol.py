@@ -81,6 +81,11 @@ def validate_client_frame(frame: object) -> dict[str, object]:
         if set(frame) != {"type", "afterSequence"} or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
             raise ProtocolError("invalid resume frame")
         return {"type": "resume", "afterSequence": sequence}
+    if frame_type == "renew":
+        ticket = frame.get("ticket")
+        if set(frame) != {"type", "ticket"} or not isinstance(ticket, str) or not 1 <= len(ticket) <= 4096:
+            raise ProtocolError("invalid renewal frame")
+        return {"type": "renew", "ticket": ticket}
     raise ProtocolError("client publishing is not supported")
 
 

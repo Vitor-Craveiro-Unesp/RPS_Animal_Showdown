@@ -105,6 +105,10 @@ quando recebem os eventos com latências diferentes.
 Veja [sincronização da apresentação](docs/presentation-sync.md) para o contrato
 de relógio, velocidades e reconexão.
 
+Os limites agregados por IP acomodam grupos de 25–40 participantes no mesmo
+Wi-Fi, mantendo limites individuais por credencial. Tickets realtime são
+renovados durante a conexão para evitar pausas periódicas em torneios longos.
+
 A capacidade da sala representa apenas o número máximo de jogadores.
 
 Uma sala para 10 pessoas poderá começar, por exemplo, com:

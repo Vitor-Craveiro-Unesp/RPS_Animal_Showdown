@@ -1,0 +1,74 @@
+{
+  "testedAt": "2026-10-07T15:53:30.111920+00:00",
+  "environment": "isolated local PostgreSQL 16 and backend; protocol clients, not browser rendering",
+  "code": "RPS-64TYKZ2C8BMBVATL",
+  "participants": 40,
+  "viewers": 41,
+  "configuration": {
+    "hearts": 1,
+    "movement": 8,
+    "countdown": 8,
+    "deliveryBufferMs": 2500,
+    "perEventBudgetMs": 750
+  },
+  "officialStatus": "completed",
+  "completionSeen": true,
+  "eventsPerConnection": 251,
+  "allCountsEqual": true,
+  "gaps": [],
+  "exceptions": [],
+  "reconnects": 0,
+  "renewals": 82,
+  "arrivalSpreadMs": {
+    "median": 18,
+    "max": 364
+  },
+  "lateDeliveryCount": 0,
+  "minimumObservedPresentationLeadMs": 990,
+  "requests": {
+    "latency_ms": {
+      "create": {
+        "count": 1,
+        "median": 137,
+        "max": 137
+      },
+      "join": {
+        "count": 40,
+        "median": 456,
+        "max": 741
+      },
+      "strategy": {
+        "count": 40,
+        "median": 787,
+        "max": 1167
+      },
+      "ready": {
+        "count": 40,
+        "median": 689,
+        "max": 1053
+      },
+      "participants": {
+        "count": 1,
+        "median": 198,
+        "max": 198
+      },
+      "ticket": {
+        "count": 123,
+        "median": 532,
+        "max": 2185
+      },
+      "start": {
+        "count": 1,
+        "median": 1173,
+        "max": 1173
+      },
+      "official_state": {
+        "count": 32,
+        "median": 352,
+        "max": 506
+      }
+    },
+    "errors": [],
+    "rate_limits": []
+  }
+}

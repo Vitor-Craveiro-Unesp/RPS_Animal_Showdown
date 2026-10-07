@@ -20,7 +20,7 @@ def initial(count, hearts, rng):
     ), hearts, rng)
 
 
-@pytest.mark.parametrize("count", [3, 5, 7, 9, 2, 4, 6, 8])
+@pytest.mark.parametrize("count", [3, 5, 7, 9, 2, 4, 6, 8, 25, 32, 40])
 @pytest.mark.parametrize("hearts", [1, 2, 3, 4])
 def test_full_bracket_recovery_identity_history_and_full_hearts(count, hearts):
     rng = Random(count * 100 + hearts)
@@ -66,7 +66,12 @@ def test_full_bracket_recovery_identity_history_and_full_hearts(count, hearts):
     assert state.current_round is None
     assert len({state.champion_id}) == 1
     assert state.champion_id in {p.player_id for p in original}
-    assert sum(len(r.matches) for r in state.completed_rounds) == count - 1 + count % 2 + int(count in (4, 7, 8))
+    # A bronze match exists only when reduction reaches four semifinalists.
+    # Derive this for arbitrary bracket sizes instead of listing small cases.
+    semifinal_size = count
+    while semifinal_size > 4:
+        semifinal_size = (semifinal_size + 1) // 2
+    assert sum(len(r.matches) for r in state.completed_rounds) == count - 1 + count % 2 + int(semifinal_size == 4)
 
 
 def test_server_draw_can_select_different_waiting_players():

@@ -6,8 +6,10 @@ from datetime import datetime, timedelta
 
 
 OPENING_DELAY_SECONDS = 3
-DELIVERY_BUFFER_MS = 1200
-PER_EVENT_DELIVERY_BUDGET_MS = 300
+# Allow durable publication and concurrent authorization checks for 40 viewers
+# before the shared visual clock starts. This lead is not divided by speed.
+DELIVERY_BUFFER_MS = 2500
+PER_EVENT_DELIVERY_BUDGET_MS = 750
 BETWEEN_ROUNDS_MS = 250
 
 

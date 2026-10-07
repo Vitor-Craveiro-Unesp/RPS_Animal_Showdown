@@ -49,3 +49,20 @@ def test_every_speed_pair_preserves_event_order_and_delivery_lead():
             assert next_at.timestamp() * 1000 >= (
                 final_payload["presentationAtMs"] + event_duration_ms(final_kind, movement, countdown)
             )
+
+
+def test_delivery_margin_covers_measured_40_viewer_delay_at_fastest_speed():
+    now = datetime(2026, 10, 6, tzinfo=UTC)
+    scheduled, _ = schedule_events([("round_resolved", {})], now=now, movement=8, countdown=8)
+    # Prior 1.2s lead was exceeded by 644ms in the real 41-connection probe.
+    latest_measured_arrival_ms = int(now.timestamp() * 1000) + 1200 + 644
+    assert scheduled[0][1]["presentationAtMs"] - latest_measured_arrival_ms >= 500
+
+
+def test_batch_lead_covers_publication_backlog_during_mass_ticket_renewal():
+    now = datetime(2026, 10, 6, tzinfo=UTC)
+    events = [(kind, {}) for kind in ("round_resolved", "heart_lost", "player_eliminated")]
+    scheduled, _ = schedule_events(events, now=now, movement=8, countdown=8)
+    # The third event was 516ms late with 2.5s base + 300ms per event.
+    measured_arrival_ms = int(now.timestamp() * 1000) + 2500 + 2 * 300 + 516
+    assert scheduled[2][1]["presentationAtMs"] - measured_arrival_ms >= 300

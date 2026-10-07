@@ -609,6 +609,47 @@ def test_tournament_creation_is_not_rate_limited() -> None:
         assert client.post("/v1/tournaments", json={"capacity": 8, "hearts_required": 2}).status_code == 201
 
 
+@pytest.mark.parametrize("size", [25, 40])
+def test_shared_venue_can_join_configure_and_ready_without_ip_throttling(size: int) -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    room = client.post("/v1/tournaments", json={"capacity": size, "hearts_required": 2}).json()
+    code = room["tournament_code"]
+    players = [ready_player(client, code, f"Venue {index}") for index in range(size)]
+    # Simulate two fallback snapshot/player polls per browser on the same NAT.
+    for _ in range(2):
+        for player in players:
+            assert client.get(f"/v1/tournaments/{code}/players/me", headers=bearer(player["player_access_token"])).status_code == 200
+    listed = client.get(f"/v1/tournaments/{code}/admin/participants", headers=bearer(room["organizer_access_token"])).json()
+    assert listed["capacity"] == size
+    assert len(listed["participants"]) == size
+    assert all(player["ready"] for player in listed["participants"])
+    # A single abusive capability still exhausts its own budget.
+    headers = bearer(players[0]["player_access_token"])
+    statuses = [client.get(f"/v1/tournaments/{code}/players/me", headers=headers).status_code for _ in range(21)]
+    assert 429 in statuses
+
+
+def test_websocket_rate_limit_database_check_does_not_run_on_event_loop() -> None:
+    import asyncio
+    import threading
+    from app.main import RealtimeRateLimitMiddleware
+
+    async def exercise():
+        loop_thread = threading.get_ident()
+        calls = []
+        class Limiter:
+            def check(self, operation, subject, limit):
+                assert threading.get_ident() != loop_thread
+                calls.append(operation)
+        async def app(scope, receive, send):
+            calls.append("accepted")
+        await RealtimeRateLimitMiddleware(app, limiter=Limiter())(
+            {"type": "websocket", "path": "/v1/realtime", "client": ("127.0.0.1", 1)}, None, None,
+        )
+        assert calls == ["realtime_connect_ip", "accepted"]
+    asyncio.run(exercise())
+
+
 def test_shared_limiter_failure_is_explicit_and_never_downgrades_to_local_memory() -> None:
     def unavailable_connection():
         raise OSError("database unavailable")
