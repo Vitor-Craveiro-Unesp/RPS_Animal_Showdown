@@ -49,7 +49,11 @@ SHA-256 subject key, resetting it only after its database TTL has expired. This
 is shared by all API instances and avoids an additional V0.1 service. Local
 `SlidingWindowRateLimiter` is limited to isolated unit-test injection.
 
-Limits are operation-specific: creation 12/hour; join 12/10 minutes;
+Tournament creation has no application-level request quota. Anonymous creation
+still writes a room and organizer capability to PostgreSQL, so automated abuse
+can increase storage and hosting costs. Monitor creation volume in production.
+
+Limits are operation-specific: join 12/10 minutes;
 strategy/ready 20/minute; training 30/minute; administration 20/minute;
 participant-authentication 20/minute; and realtime ticket/handshake 30/minute.
 Every request consumes a key based on `ip:<ASGI peer>`; bearer-bearing actions
@@ -59,9 +63,11 @@ edge proxy must remove user-provided variants and arrange for the ASGI peer to
 be the verified client address. Administrative and participant limits run
 before bearer validation, so rejected guesses cannot avoid rate limiting.
 
-If PostgreSQL is unavailable or an increment fails, HTTP routes return a
-neutral `503` with a short retry hint and WebSocket handshakes close before
-`accept` with `1013`. There is intentionally no local fail-open fallback.
+If the shared limiter is unavailable or an increment fails, routes that use it
+return a neutral `503` with a short retry hint and WebSocket handshakes close
+before `accept` with `1013`. Tournament creation uses the durable store but
+does not call the limiter. There is no local fail-open fallback for protected
+routes.
 
 ## Durable authorization and realtime handoff (SEC-001 / SEC-003)
 

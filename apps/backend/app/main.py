@@ -57,7 +57,6 @@ from .store import (
 
 
 RATE_LIMITS = {
-    "create": RateLimit(max_requests=12, window_seconds=3600),
     "join": RateLimit(max_requests=12, window_seconds=600),
     "strategy": RateLimit(max_requests=20, window_seconds=60),
     "admin": RateLimit(max_requests=20, window_seconds=60),
@@ -373,8 +372,7 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/v1/tournaments", status_code=status.HTTP_201_CREATED, tags=["tournaments"])
-    def create_tournament(intent: CreateTournamentIntent, request: Request) -> dict[str, object]:
-        limit(request, "create")
+    def create_tournament(intent: CreateTournamentIntent) -> dict[str, object]:
         tournament, organizer_token = tournament_store.create_tournament(
             intent.capacity,
             intent.hearts_required,

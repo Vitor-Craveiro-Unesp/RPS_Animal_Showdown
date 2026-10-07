@@ -41,7 +41,7 @@ expiry/revocation, room authorization and atomic state changes. Do not trust
 `X-Forwarded-For` or `Forwarded` at the application layer; configure the
 production proxy boundary to strip them and provide a verified peer address.
 
-Operation limits apply to creation, joining, strategy/ready updates, training,
+Operation limits apply to joining, strategy/ready updates, training,
 administrative requests, realtime-ticket issuance and every WebSocket
 connection/reconnection before `accept`. Every protected action consumes an
 `ip:<ASGI peer>` key; actions carrying a bearer also consume a separate

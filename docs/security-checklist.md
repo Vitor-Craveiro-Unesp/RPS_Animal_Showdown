@@ -17,7 +17,7 @@ O backlog com dono, dependências e critérios verificáveis está em [tasks/sec
 | Resultado, vidas, BYE ou chaveamento forjados | O backend executa o Engine e persiste a transição oficial; o cliente não envia estados finais. |
 | Estratégia alterada após início | Validar servidor-side e aplicar bloqueio transacional no início do torneio. |
 | Controle indevido de torneio | Autorização real por sala para toda ação do organizador; URL e interface não são autorização. |
-| Enumeração/brute force de código | Código opaco, não sequencial, mensagens neutras e rate limiting em entrada/criação. |
+| Enumeração/brute force de código | Código opaco, não sequencial, mensagens neutras e rate limiting na entrada. |
 | Acesso cruzado entre torneios | Escopo de sala em cada consulta/evento e autorização antes de leitura ou mutação. |
 | Realtime forjado ou repetido | Apenas servidor publica eventos oficiais; autenticar assinatura, validar sequência e tornar comandos idempotentes. |
 | Corrida ao iniciar/processar partida | Transações, versão/lock de estado e uma única transição oficial por partida. |

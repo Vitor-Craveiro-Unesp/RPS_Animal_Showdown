@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import RATE_LIMITS, create_app
+from app.main import create_app
 from app.postgres_store import PostgresTournamentStore
 from app.security import (
     PostgresFixedWindowRateLimiter,
@@ -595,11 +595,10 @@ def test_rate_limits_are_operation_specific_and_recover_after_the_window() -> No
     limiter.check("admin", "client-a", limit)
 
 
-def test_tournament_creation_allows_twelve_requests_per_hour() -> None:
-    create_limit = RATE_LIMITS["create"]
-
-    assert create_limit.max_requests == 12
-    assert create_limit.window_seconds == 3600
+def test_tournament_creation_is_not_rate_limited() -> None:
+    client = TestClient(create_app(store=InMemoryTournamentStore()))
+    for _ in range(13):
+        assert client.post("/v1/tournaments", json={"capacity": 8, "hearts_required": 2}).status_code == 201
 
 
 def test_shared_limiter_failure_is_explicit_and_never_downgrades_to_local_memory() -> None:
@@ -619,7 +618,9 @@ def test_http_fails_closed_when_an_injected_shared_limiter_is_unavailable() -> N
             raise RateLimiterUnavailable("database unavailable")
 
     client = TestClient(create_app(store=InMemoryTournamentStore(), limiter=UnavailableLimiter()))
-    response = client.post("/v1/tournaments", json={"capacity": 8, "hearts_required": 2})
+    response = client.post("/v1/tournaments/join", json={
+        "tournament_code": "RPS-UNKNOWNROOM1", "display_name": "Player", "animal_id": "tiger"
+    })
     assert response.status_code == 503
     assert response.json()["detail"] == "Request protection is temporarily unavailable."
     assert response.headers["retry-after"] == "5"
