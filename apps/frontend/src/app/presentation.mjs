@@ -28,8 +28,8 @@ export function eventSteps(event, movement = 1, countdown = 1) {
     case 'player_waiting': return [step('waiting', 900)];
     case 'second_chance_selected': return [step('secondChance', 1400)];
     case 'match_started': return [step('entrance', 900)];
-    case 'round_resolved': return [3, 2, 1].map(number => ({ ...step('countdown', 0, 'countdown'), number, ms: duration(650, countdown) })).concat([step('reveal', 650), step('result', 500, event.payload?.outcome === 'tie' ? 'tie' : null)]);
-    case 'heart_lost': return [step('heart', 650, 'heart_lost')];
+    case 'round_resolved': return [3, 2, 1].map(number => ({ ...step('countdown', 0, 'countdown'), number, ms: duration(650, countdown) })).concat([step('reveal', 200), step('result', 150, event.payload?.outcome === 'tie' ? 'tie' : null)]);
+    case 'heart_lost': return [step('heart', 200, 'heart_lost')];
     case 'player_eliminated': return [step('elimination', 700)];
     case 'match_completed': return [step('victory', 750)];
     case 'player_advanced': return [step('advance', 900)];
@@ -44,6 +44,14 @@ export function eventSteps(event, movement = 1, countdown = 1) {
     ];
     default: return [];
   }
+}
+
+// Shorter result animations must not make the chosen symbols unreadable.
+// Retain only an already-revealed round until the next countdown/entrance.
+export function retainedRoundMoves(current, step) {
+  if (step.phase === 'countdown' || step.phase === 'entrance') return null;
+  if (step.phase === 'reveal' && step.event.eventType === 'round_resolved') return step.event.payload;
+  return current;
 }
 
 // Each event carries a server-owned UTC slot. The receive time is never used

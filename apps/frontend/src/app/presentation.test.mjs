@@ -1,10 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PresentationQueue, eventSteps, scheduledSteps, duration, officialOutcomeClass, presentationContextKey, serverClockOffset, stateForPresentation } from './presentation.mjs';
+import { PresentationQueue, eventSteps, scheduledSteps, duration, officialOutcomeClass, presentationContextKey, serverClockOffset, stateForPresentation, retainedRoundMoves } from './presentation.mjs';
 import { AUDIO_ASSETS, AudioManager } from './audio-manager.mjs';
 
 const event = (sequence, eventType = 'round_resolved', stateVersion = sequence) => ({ eventId: `id-${sequence}`, sequence, eventType, payload: { stateVersion } });
+
+test('shorter phases preserve revealed moves until the next countdown without early disclosure', () => {
+  const resolved = {...event(1), payload: {matchId: 'm1', playerOneMove: 'rock', playerTwoMove: 'paper'}};
+  assert.equal(retainedRoundMoves(null, {phase: 'countdown', event: resolved}), null);
+  const moves = retainedRoundMoves(null, {phase: 'reveal', event: resolved});
+  assert.equal(moves, resolved.payload);
+  for (const phase of ['result', 'heart', 'elimination', 'victory']) {
+    assert.equal(retainedRoundMoves(moves, {phase, event: event(2, 'heart_lost')}), moves);
+  }
+  assert.equal(retainedRoundMoves(moves, {phase: 'countdown', event: resolved}), null);
+  assert.equal(retainedRoundMoves(moves, {phase: 'entrance', event: event(3, 'match_started')}), null);
+});
+
+test('normal 1x round has a five second cycle while preserving delivery lead', () => {
+  const start = 10000;
+  const steps = scheduledSteps({...event(1), payload: {clientPresentationAtMs: start}}, 1, 1);
+  const heart = eventSteps(event(2, 'heart_lost'), 1, 1);
+  const finish = steps.at(-1).startsAtMs + steps.at(-1).ms + heart[0].ms;
+  const nextCountdown = finish + 2500;
+  assert.equal(nextCountdown - start, 5000);
+  assert.equal(nextCountdown - steps[3].startsAtMs, 3050);
+});
 
 test('only the official resolved match dims the loser and highlights the winner', () => {
   const pending = { player_one_hearts: 0, winner_id: null, loser_id: null };
@@ -166,7 +188,7 @@ test('every viewer uses the same authoritative phase times instead of arrival ti
   const late = scheduledSteps(official, 1, 1, 9_500);
   assert.deepEqual(early.map(step => step.startsAtMs), late.map(step => step.startsAtMs));
   assert.deepEqual(early.slice(0, 3).map(step => step.startsAtMs), [10_000, 10_650, 11_300]);
-  assert.equal(early.at(-1).startsAtMs, 12_600);
+  assert.equal(early.at(-1).startsAtMs, 12_150);
   assert.equal(scheduledSteps(event(13), 1, 1, 20_000)[0].startsAtMs, 20_000);
 });
 
@@ -208,7 +230,7 @@ for (const movement of [.5, 1, 2, 4, 8]) for (const countdown of [.5, 1, 2, 4, 8
     for (let index = 0; index < steps.length - 1; index++) {
       assert.equal(steps[index + 1].startsAtMs, steps[index].startsAtMs + steps[index].ms);
     }
-    assert.equal(steps.at(-1).startsAtMs + steps.at(-1).ms - start, 1950 / countdown + 1150 / movement);
+    assert.equal(steps.at(-1).startsAtMs + steps.at(-1).ms - start, 1950 / countdown + 350 / movement);
   });
 }
 

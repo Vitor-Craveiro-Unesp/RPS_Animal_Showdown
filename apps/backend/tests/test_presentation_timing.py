@@ -12,14 +12,14 @@ def test_server_stamps_one_monotonic_timeline_for_all_viewers():
     scheduled, next_at = schedule_events(events, now=now, movement=1, countdown=1)
     starts = [payload["presentationAtMs"] for _, payload in scheduled]
     assert starts[1] - starts[0] == 900
-    assert starts[2] - starts[1] == 3100
-    assert next_at.timestamp() * 1000 > starts[2] + 650
+    assert starts[2] - starts[1] == 2300
+    assert next_at.timestamp() * 1000 == starts[2] + 200
     assert not any("presentationAtMs" in payload for _, payload in events)
 
 
 def test_timing_respects_both_speed_controls_and_opening_delay():
     assert OPENING_DELAY_SECONDS == 3
-    assert event_duration_ms("round_resolved", 2, 0.5) == 1950 / 0.5 + 1150 / 2
+    assert event_duration_ms("round_resolved", 2, 0.5) == 1950 / 0.5 + 350 / 2
     assert event_duration_ms("final_started", 1, 1) == 0
     assert event_duration_ms("champion", 1, 1) == 9300
     now = datetime(2026, 10, 6, tzinfo=UTC)
@@ -66,3 +66,15 @@ def test_batch_lead_covers_publication_backlog_during_mass_ticket_renewal():
     # The third event was 516ms late with 2.5s base + 300ms per event.
     measured_arrival_ms = int(now.timestamp() * 1000) + 2500 + 2 * 300 + 516
     assert scheduled[2][1]["presentationAtMs"] - measured_arrival_ms >= 300
+
+
+def test_normal_round_targets_five_second_cycle_and_three_second_reveal_gap():
+    now = datetime(2026, 10, 6, tzinfo=UTC)
+    events = [("round_resolved", {}), ("heart_lost", {})]
+    first, next_at = schedule_events(events, now=now, movement=1, countdown=1)
+    second, _ = schedule_events(events, now=next_at, movement=1, countdown=1)
+    cycle_ms = second[0][1]["presentationAtMs"] - first[0][1]["presentationAtMs"]
+    assert cycle_ms == 5000
+    assert cycle_ms - 1950 == 3050  # The existing countdown is 3 * 650ms.
+    assert DELIVERY_BUFFER_MS == 2500
+    assert PER_EVENT_DELIVERY_BUDGET_MS == 750

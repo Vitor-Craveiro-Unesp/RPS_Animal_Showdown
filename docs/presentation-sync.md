@@ -33,6 +33,32 @@ o estado oficial atual em vez de reproduzir jogadas antigas fora de tempo.
 
 Os testes de timing cobrem todas as 25 combinações de 0,5×, 1×, 2×, 4× e 8×.
 
+## Ritmo de cinco segundos em 1×
+
+Entre duas jogadas normais da mesma dupla, com perda de coração sem eliminação,
+o ciclo programado em 1× é 5.000 ms: contagem 1.950 ms, revelação 200 ms,
+resultado 150 ms, coração 200 ms e antecedência de entrega da próxima jogada
+2.500 ms. Da revelação até a próxima contagem são 3.050 ms (aproximadamente
+3 s). Não há mais pausa adicional de 250 ms. Os símbolos já revelados ficam
+visíveis durante a espera para manter a leitura; são ocultados na próxima
+contagem ou entrada, nunca mostrados antecipadamente.
+
+Empates dispensam o coração; eliminações, trocas de adversário e pódio têm
+etapas adicionais. O processamento e a consulta periódica do worker podem
+acrescentar tempo aos valores programados. A margem de entrega e o orçamento
+por evento permanecem 2.500/750 ms. Backend e frontend devem ser publicados
+juntos para manter a mesma tabela de durações.
+
+Validação local em 2026-10-07: 14 testes backend direcionados, 78 testes frontend,
+build e lint passaram. O torneio isolado `RPS-PYSG8QSLLVHJW8AQ`, com 40
+participantes em 8× e 41 conexões WebSocket, terminou com os mesmos 270 eventos
+em todas as conexões, sem lacunas, reconexões ou erros HTTP; houve 82 renovações.
+Um evento (sequência 243) chegou após o horário previsto em 19 conexões, com
+atraso máximo de 114 ms. A dispersão máxima de chegada foi 519 ms. Portanto,
+este ensaio não comprova ausência absoluta de atrasos. O coletor valida o
+protocolo, não 41 navegadores renderizando; os tempos de 5.000/3.050 ms em 1×
+foram verificados pelos testes determinísticos.
+
 ## Grupos de 25–40 participantes
 
 A margem base de entrega é 2,5 s e não é dividida pela velocidade escolhida.

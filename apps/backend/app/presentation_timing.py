@@ -10,7 +10,7 @@ OPENING_DELAY_SECONDS = 3
 # before the shared visual clock starts. This lead is not divided by speed.
 DELIVERY_BUFFER_MS = 2500
 PER_EVENT_DELIVERY_BUDGET_MS = 750
-BETWEEN_ROUNDS_MS = 250
+BETWEEN_ROUNDS_MS = 0
 
 
 def event_duration_ms(event_type: str, movement: float, countdown: float) -> float:
@@ -20,8 +20,8 @@ def event_duration_ms(event_type: str, movement: float, countdown: float) -> flo
         "player_waiting": 900 / movement,
         "second_chance_selected": 1400 / movement,
         "match_started": 900 / movement,
-        "round_resolved": 1950 / countdown + 1150 / movement,
-        "heart_lost": 650 / movement,
+        "round_resolved": 1950 / countdown + 350 / movement,
+        "heart_lost": 200 / movement,
         "player_eliminated": 700 / movement,
         "match_completed": 750 / movement,
         "player_advanced": 900 / movement,

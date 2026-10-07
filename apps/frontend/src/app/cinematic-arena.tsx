@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { officialOutcomeClass, scheduledSteps, PresentationQueue, stateForPresentation } from "./presentation.mjs";
+import { officialOutcomeClass, scheduledSteps, PresentationQueue, stateForPresentation, retainedRoundMoves } from "./presentation.mjs";
 import { AudioManager } from "./audio-manager.mjs";
 
 // Public DTOs only: this component never submits a competitive mutation.
@@ -15,6 +15,7 @@ type Props = { podiumControls?: import("react").ReactNode; state: State | null; 
 
 export default function CinematicArena({ podiumControls, state, events, queue, revision, movement, countdown, audio, emoji, u, realtime }: Props) {
   const [step, setStep] = useState<Step | null>(null);
+  const [visibleMoves, setVisibleMoves] = useState<Event['payload'] | null>(null);
   const [match, setMatch] = useState<Match | null>(null);
   const [presentationState, setPresentationState] = useState<State | null>(state?.presentation_state ?? state);
   const [podiumPresented, setPodiumPresented] = useState(() => Boolean(state?.champion_id && !state?.presentation_state && !queue.pending.length));
@@ -41,7 +42,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       if (stopped) return;
       if (generationRef.current !== queue.generation) {
         generationRef.current = queue.generation; stepsRef.current = []; roundTransitionRef.current = null;
-        setStep(null); setMatch(null); setPresentationState(stateRef.current?.presentation_state ?? stateRef.current);
+        setStep(null); setMatch(null); setVisibleMoves(null); setPresentationState(stateRef.current?.presentation_state ?? stateRef.current);
         setPodiumPresented(Boolean(stateRef.current?.champion_id && !stateRef.current?.presentation_state));
         playbackRef.current.audio?.stop('effect'); playbackRef.current.audio?.stop('animal');
       }
@@ -61,6 +62,7 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
       if (untilStart > 0) { stepsRef.current.unshift(next); timer = setTimeout(pump, untilStart); return; }
       const onTime = next.ms === 0 || Date.now() < next.startsAtMs + next.ms;
       if (onTime) setStep(next);
+      setVisibleMoves((current: Event['payload'] | null) => retainedRoundMoves(current, next));
       const payload = next.event.payload ?? {};
       const eventState = payload.state ?? roundTransitionRef.current?.after ?? stateRef.current;
       if (next.event.eventType === 'round_resolved' && next.phase === 'countdown' && next.number === 3) {
@@ -127,13 +129,16 @@ export default function CinematicArena({ podiumControls, state, events, queue, r
   const champion = step?.phase === 'champion' ? payload.playerId : null;
   const podium = ['podium_second', 'podium_third', 'podium'].includes(step?.phase ?? '') || (!step && podiumPresented && Boolean(visibleState?.champion_id));
   const podiumPlaces = step?.phase === 'podium_second' ? 2 : 3;
-  const revealed = step && ['reveal','result'].includes(step.phase);
+  const revealed = Boolean(visibleMoves && visibleMoves.matchId === active?.match_id);
   const symbols: Record<string,string> = { rock:'✊', paper:'📄', scissors:'✂️' };
-  const fighter = (id: string | null, lives: number | null, move: string) => <div className={`cinema-fighter ${officialOutcomeClass(active, id)}`}>
+  const fighter = (id: string | null, lives: number | null, move: string) => {
+    if (revealed) move = id === active?.player_one_id ? visibleMoves.playerOneMove : visibleMoves.playerTwoMove;
+    return <div className={`cinema-fighter ${officialOutcomeClass(active, id)}`}>
     <span className="cinema-mascot" data-fighter={id} title={player(id)?.second_chance ? `${u('zombie')} · ${u('secondChanceReturn')}` : undefined}>{mascot(id)}</span><b>{player(id)?.display_name}</b>
     <div className={`cinema-hearts ${step?.phase === 'heart' && payload.playerId === id ? 'heart-breaking' : ''}`} aria-label={`${u('heartsCount')}: ${lives ?? 0}`}>{'❤️'.repeat(Math.max(0,lives ?? 0))}{step?.phase === 'heart' && payload.playerId === id && <span>💔</span>}</div>
     <div className="cinema-move">{revealed ? <>{symbols[move]} <small>{u(move)}</small></> : ' '}</div>
   </div>;
+  };
   return <div className="cinematic-layout" ref={stageRef}>
     <div className="card cinema-stage" style={{ '--phase-duration': `${step?.ms ?? 0}ms` } as CSSProperties}>
       {step && ['advance','bye'].includes(step.phase) && <div className="cinema-transit"><span data-arrival={payload.playerId}>{mascot(payload.playerId)}</span><b>{player(payload.playerId)?.display_name}</b><span>{u(`cinema_${step.phase}`)}</span></div>}
