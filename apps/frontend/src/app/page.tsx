@@ -217,9 +217,8 @@ export default function HomePage() {
   const eventsRef = useRef<OfficialEvent[]>([]);
   const latestVersionRef = useRef(0);
   const lastOfficialStateRef = useRef<OfficialState | null>(null);
-  const repeatCommandRef = useRef<{ run: string; key: string } | null>(null);
-  const repeatBusyRef = useRef(false);
-  const [repeatBusy, setRepeatBusy] = useState(false);
+  const readyBusyRef = useRef(false);
+  const [readyBusy, setReadyBusy] = useState(false);
   const trainingChampionCueRef = useRef<string | null>(null);
   const synchronizeRun = useCallback((state: OfficialState) => {
     const oldRun = lastOfficialStateRef.current?.run_id;
@@ -543,31 +542,41 @@ export default function HomePage() {
 
   async function readyForTournament() {
     if (!code.trim() || !name.trim() || !validStrategy) return reportRequestFailure();
-    let capability = playerToken;
-    if (!capability) {
-      const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
-      if (!joined.ok) return reportRequestFailure(joined);
-      const payload = await joined.json();
-      capability = payload.player_access_token;
-      setTournamentId(payload.tournament_id);
-      if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
-      if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
-      if (typeof payload.countdown_speed === "string") setCountdownSpeed(payload.countdown_speed as PlaybackSpeed);
-      setPlayerToken(capability);
-      setOrganizerToken("");
-      saveParticipantSession(sessionStorage, {
-        code: payload.tournament_code,
-        tournamentId: payload.tournament_id,
-        playerToken: capability,
-      });
+    if (readyBusyRef.current) return;
+    readyBusyRef.current = true;
+    setReadyBusy(true);
+    try {
+      let capability = playerToken;
+      if (!capability) {
+        const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
+        if (!joined.ok) return reportRequestFailure(joined);
+        const payload = await joined.json();
+        capability = payload.player_access_token;
+        setTournamentId(payload.tournament_id);
+        if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
+        if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
+        if (typeof payload.countdown_speed === "string") setCountdownSpeed(payload.countdown_speed as PlaybackSpeed);
+        setPlayerToken(capability);
+        setOrganizerToken("");
+        saveParticipantSession(sessionStorage, {
+          code: payload.tournament_code,
+          tournamentId: payload.tournament_id,
+          playerToken: capability,
+        });
+      }
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${capability}` };
+      const strategyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, { method: "PUT", headers, body: JSON.stringify(strategy) });
+      if (!strategyResponse.ok) return reportRequestFailure(strategyResponse);
+      const readyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/ready`, { method: "POST", headers, body: "{}" });
+      if (!readyResponse.ok) return reportRequestFailure(readyResponse);
+      clearRequestFailure();
+      setScreen("waiting");
+    } catch {
+      reportRequestFailure();
+    } finally {
+      readyBusyRef.current = false;
+      setReadyBusy(false);
     }
-    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${capability}` };
-    const strategyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, { method: "PUT", headers, body: JSON.stringify(strategy) });
-    if (!strategyResponse.ok) return reportRequestFailure(strategyResponse);
-    const readyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/ready`, { method: "POST", headers, body: "{}" });
-    if (!readyResponse.ok) return reportRequestFailure(readyResponse);
-    clearRequestFailure();
-    setScreen("waiting");
   }
 
   async function startTournament() {
@@ -601,35 +610,6 @@ export default function HomePage() {
       setRealtimeStatus("connecting");
     }
     setScreen("arena");
-  }
-
-  async function repeatTournament() {
-    const run = officialState?.run_id;
-    if (!run || !organizerToken || repeatBusyRef.current || officialState?.status !== "completed") return;
-    repeatBusyRef.current = true;
-    setRepeatBusy(true);
-    if (repeatCommandRef.current?.run !== run) repeatCommandRef.current = { run, key: crypto.randomUUID() };
-    try {
-      const response = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/admin/repeat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${organizerToken}`, "Idempotency-Key": repeatCommandRef.current.key },
-        body: JSON.stringify({ expected_run_id: run }),
-      });
-      if (!response.ok) return reportRequestFailure(response);
-      clearRequestFailure();
-      const snapshot = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/official-state`, { headers: { Authorization: `Bearer ${organizerToken}` } });
-      if (!snapshot.ok) return reportRequestFailure(snapshot);
-      const state = await snapshot.json() as OfficialState;
-      if ((state.state_version ?? 0) >= latestVersionRef.current) {
-        synchronizeRun(state);
-        latestVersionRef.current = state.state_version ?? 0;
-        lastOfficialStateRef.current = state;
-        setOfficialState(state);
-        reconcilePresentation(latestVersionRef.current);
-      }
-      setScreen("arena");
-    } catch { reportRequestFailure(); }
-    finally { repeatBusyRef.current = false; setRepeatBusy(false); }
   }
 
   function startAnimalRush() {
@@ -842,7 +822,7 @@ export default function HomePage() {
         <div className="toolbar strategy-actions"><button className="button secondary" onClick={randomize}>🎲 {u("random")}</button><button className="button secondary" onClick={randomizeAll}>🎲🎲 {u("randomAll")}</button></div>
         <p className={`total ${total === 100 ? "good" : "bad"}`}>{t("total")} {total}%</p>
         {requestFailed && <p className="notice" role="alert">{requestFailureMessage}</p>}
-        <button disabled={!validStrategy} className="button" onClick={() => screen === "guest-strategy" ? startGuestTraining() : void readyForTournament()}>{screen === "guest-strategy" ? u("startTraining") : t("ready")}</button>
+        <button disabled={!validStrategy || (screen !== "guest-strategy" && readyBusy)} className="button" onClick={() => screen === "guest-strategy" ? startGuestTraining() : void readyForTournament()}>{screen === "guest-strategy" ? u("startTraining") : t("ready")}</button>
       </div>
     </section>}
 
@@ -909,7 +889,7 @@ export default function HomePage() {
     {screen === "arena" && <section>
       {officialStartNotice && <p className="notice success official-start-notice">{u("tournamentStartedNotice")}</p>}
       <h1 className="view-title">{t("arena")}</h1>
-      <CinematicArena state={officialState} events={officialEvents} queue={presentationQueue} revision={presentationRevision} movement={movementSpeed} countdown={countdownSpeed} audio={audio} emoji={playerEmoji} u={u} realtime={realtimeStatus} podiumControls={organizerToken && officialState?.status === "completed" && <div className="actions"><button className="button primary" disabled={repeatBusy || !officialState.run_id} onClick={() => void repeatTournament()}>🔄 {u("repeatTournament")}</button><button className="button" onClick={() => setScreen("organizer")}>{u("backToPanel")}</button></div>} />
+      <CinematicArena state={officialState} events={officialEvents} queue={presentationQueue} revision={presentationRevision} movement={movementSpeed} countdown={countdownSpeed} audio={audio} emoji={playerEmoji} u={u} realtime={realtimeStatus} podiumControls={organizerToken && officialState?.status === "completed" && <div className="actions"><button className="button" onClick={() => setScreen("organizer")}>{u("backToPanel")}</button></div>} />
       {requestFailed && <p role="alert" className="notice">{requestFailureMessage}</p>}
     </section>}
   </main>;
