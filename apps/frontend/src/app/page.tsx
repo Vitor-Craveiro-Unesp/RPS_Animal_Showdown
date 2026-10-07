@@ -9,6 +9,7 @@ import { requestFeedbackKind } from "./request-feedback.mjs";
 import { realtimeDisplayStatus, shouldPollOfficialSnapshot } from "./realtime-status.mjs";
 import { participantStatusCounts } from "./participant-status.mjs";
 import { hasCurrentTournamentArena, restoreTournamentSession, saveOrganizerSession, saveParticipantSession, saveTournamentView } from "./organizer-session.mjs";
+import { normalizeTournamentCode, tournamentApiPath } from "./tournament-code.mjs";
 import { animalName, animalShowcaseRows, Locale, localeNames, locales, regionName, scientificName, text, uiText } from "../i18n/catalog";
 import { animalRushRoundDuration, randomAnimalRushMove, resolveAnimalRushAnswer, winningAnimalRushMove } from "./animal-rush.mjs";
 
@@ -614,20 +615,22 @@ export default function HomePage() {
     }
   }
 
-  async function ensureJoinedPlayer(): Promise<string | null> {
-    if (playerToken) return playerToken;
-    const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: code, display_name: name, animal_id: animal.id }) });
+  async function ensureJoinedPlayer(): Promise<{ capability: string; roomCode: string } | null> {
+    if (playerToken) return { capability: playerToken, roomCode: normalizeTournamentCode(code) };
+    const joined = await fetch("/api/v1/tournaments/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tournament_code: normalizeTournamentCode(code), display_name: name, animal_id: animal.id }) });
     if (!joined.ok) { reportRequestFailure(joined); return null; }
     const payload = await joined.json();
     const capability = payload.player_access_token as string;
+    const roomCode = payload.tournament_code as string;
+    setCode(roomCode);
     setTournamentId(payload.tournament_id);
     if (typeof payload.hearts_required === "number") setHeartsRequired(payload.hearts_required);
     if (typeof payload.movement_speed === "string") setMovementSpeed(payload.movement_speed as PlaybackSpeed);
     if (typeof payload.countdown_speed === "string") setCountdownSpeed(payload.countdown_speed as PlaybackSpeed);
     setPlayerToken(capability);
     setOrganizerToken("");
-    saveParticipantSession(sessionStorage, { code: payload.tournament_code, tournamentId: payload.tournament_id, playerToken: capability });
-    return capability;
+    saveParticipantSession(sessionStorage, { code: roomCode, tournamentId: payload.tournament_id, playerToken: capability });
+    return { capability, roomCode };
   }
 
   async function enterStrategy() {
@@ -636,12 +639,12 @@ export default function HomePage() {
     joinBusyRef.current = true;
     setJoinBusy(true);
     try {
-      const capability = await ensureJoinedPlayer();
-      if (!capability) return;
+      const joined = await ensureJoinedPlayer();
+      if (!joined) return;
       // A saved draft is not READY. It only makes the editing stage visible to
       // the organizer; the final strategy is replaced on confirmation.
-      const draft = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, {
-        method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${capability}` }, body: JSON.stringify(strategy),
+      const draft = await fetch(tournamentApiPath(joined.roomCode, "players/me/strategy"), {
+        method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${joined.capability}` }, body: JSON.stringify(strategy),
       });
       if (!draft.ok) return reportRequestFailure(draft);
       clearRequestFailure();
@@ -656,12 +659,12 @@ export default function HomePage() {
     readyBusyRef.current = true;
     setReadyBusy(true);
     try {
-      const capability = await ensureJoinedPlayer();
-      if (!capability) return;
-      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${capability}` };
-      const strategyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/strategy`, { method: "PUT", headers, body: JSON.stringify(strategy) });
+      const joined = await ensureJoinedPlayer();
+      if (!joined) return;
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${joined.capability}` };
+      const strategyResponse = await fetch(tournamentApiPath(joined.roomCode, "players/me/strategy"), { method: "PUT", headers, body: JSON.stringify(strategy) });
       if (!strategyResponse.ok) return reportRequestFailure(strategyResponse);
-      const readyResponse = await fetch(`/api/v1/tournaments/${encodeURIComponent(code)}/players/me/ready`, { method: "POST", headers, body: "{}" });
+      const readyResponse = await fetch(tournamentApiPath(joined.roomCode, "players/me/ready"), { method: "POST", headers, body: "{}" });
       if (!readyResponse.ok) return reportRequestFailure(readyResponse);
       clearRequestFailure();
       setScreen("waiting");
